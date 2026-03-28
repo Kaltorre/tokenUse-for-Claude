@@ -27,8 +27,9 @@ import { WeeklyAggregationTab } from "@/components/WeeklyAggregationTab";
 import { CalibrationDeltaTable } from "@/components/CalibrationDeltaTable";
 import { PlanPeriod, PromoPeriod } from "@/lib/types";
 import { useTheme, ThemeToggle } from "@/components/ThemeToggle";
+import { SourcesPanel } from "@/components/SourcesPanel";
 
-type Tab = "overview" | "sessions" | "projects" | "limits" | "weeklyAgg" | "deltaAnalysis" | "weeklyWindows" | "calibration" | "plan" | "promos" | "pricing";
+type Tab = "overview" | "sessions" | "projects" | "limits" | "weeklyAgg" | "deltaAnalysis" | "weeklyWindows" | "calibration" | "plan" | "promos" | "sources" | "pricing";
 
 type NavItem = { key: Tab; label: string; icon: string; indent?: boolean };
 type NavSection = { section: string; items: NavItem[] };
@@ -52,6 +53,7 @@ const NAV_ENTRIES: NavEntry[] = [
       { key: "weeklyWindows", label: "Windows", icon: "▣", indent: true },
       { key: "promos", label: "Promos", icon: "✦", indent: true },
       { key: "calibration", label: "Calibration", icon: "⊕", indent: true },
+      { key: "sources", label: "Sources", icon: "⊞", indent: true },
     ],
   },
   { key: "pricing", label: "Pricing", icon: "$" },
@@ -415,6 +417,13 @@ export default function Home() {
         {tab === "promos" && (
           <div className="animate-fade-in max-w-4xl">
             <PromoPanel periods={promoPeriods} onPeriodsChange={handlePromoChange} />
+          </div>
+        )}
+
+        {/* Sources Tab */}
+        {tab === "sources" && (
+          <div className="animate-fade-in max-w-4xl">
+            <SourcesPanel />
           </div>
         )}
 

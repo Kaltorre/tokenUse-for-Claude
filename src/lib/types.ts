@@ -51,10 +51,15 @@ export interface DailyStats {
 export interface ProjectStats {
   project: string;
   totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
   totalCost: number;
   sessionCount: number;
   messageCount: number;
   lastUsed: string;
+  models: Record<string, ModelTokenBreakdown>;
 }
 
 export interface ModelStats {
@@ -354,4 +359,17 @@ export interface UsageData {
   models: ModelStats[];
   hourly: { hour: number; tokens: number; cost: number; messages: number }[];
   limits: LimitsData;
+}
+
+// --- Data Sources ---
+
+export interface DataSource {
+  id: string;
+  path: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface SourcesConfig {
+  sources: DataSource[];
 }

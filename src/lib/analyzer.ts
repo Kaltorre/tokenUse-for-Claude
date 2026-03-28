@@ -102,13 +102,35 @@ function buildProjectStats(entries: UsageEntry[]): ProjectStats[] {
 
   for (const [project, projEntries] of Object.entries(byProject)) {
     const sessions = new Set(projEntries.map((e) => e.sessionId));
+
+    const models: Record<string, import("./types").ModelTokenBreakdown> = {};
+    for (const e of projEntries) {
+      const name = getModelDisplayName(e.model);
+      if (!models[name]) {
+        models[name] = { messageCount: 0, inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, totalCost: 0 };
+      }
+      const m = models[name];
+      m.messageCount += 1;
+      m.inputTokens += e.usage.input_tokens;
+      m.outputTokens += e.usage.output_tokens;
+      m.cacheCreationTokens += e.usage.cache_creation_input_tokens;
+      m.cacheReadTokens += e.usage.cache_read_input_tokens;
+      m.totalTokens += totalTokens(e);
+      m.totalCost += e.cost;
+    }
+
     stats.push({
       project,
       totalTokens: projEntries.reduce((sum, e) => sum + totalTokens(e), 0),
+      inputTokens: sumTokenField(projEntries, "input_tokens"),
+      outputTokens: sumTokenField(projEntries, "output_tokens"),
+      cacheCreationTokens: sumTokenField(projEntries, "cache_creation_input_tokens"),
+      cacheReadTokens: sumTokenField(projEntries, "cache_read_input_tokens"),
       totalCost: projEntries.reduce((sum, e) => sum + e.cost, 0),
       sessionCount: sessions.size,
       messageCount: projEntries.length,
       lastUsed: projEntries[projEntries.length - 1].timestamp,
+      models,
     });
   }
 

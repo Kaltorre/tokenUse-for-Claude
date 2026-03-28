@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { UsageEntry, TokenUsage } from "./types";
+import { UsageEntry, TokenUsage, DataSource } from "./types";
 import { calculateCost } from "./pricing";
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude", "projects");
@@ -9,15 +9,37 @@ const CACHE_DIR = path.join(os.homedir(), ".claude-monitor-cache");
 const CACHE_FILE = path.join(CACHE_DIR, "usage-cache.json");
 const CACHE_META_FILE = path.join(CACHE_DIR, "cache-meta.json");
 
+const DATA_DIR = path.join(process.cwd(), "data");
+const SOURCES_FILE = path.join(DATA_DIR, "sources.json");
+
 interface CacheMeta {
   files: Record<string, { mtime: number; size: number }>;
   lastFullScan: number;
+  sourcesHash?: string;
 }
 
 function ensureCacheDir() {
   if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
   }
+}
+
+export function loadSources(): DataSource[] {
+  try {
+    if (fs.existsSync(SOURCES_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(SOURCES_FILE, "utf-8"));
+      return (raw.sources ?? []) as DataSource[];
+    }
+  } catch {}
+  return [];
+}
+
+function getSourcesHash(sources: DataSource[]): string {
+  return sources
+    .filter((s) => s.enabled)
+    .map((s) => `${s.path}|${s.label}`)
+    .sort()
+    .join(";");
 }
 
 function findJsonlFiles(dir: string): string[] {
@@ -44,12 +66,12 @@ function findJsonlFiles(dir: string): string[] {
   return files;
 }
 
-function extractProjectName(filePath: string): string {
-  const normalizedClaude = CLAUDE_DIR.replace(/\\/g, "/");
+function extractProjectName(filePath: string, baseDir: string, sourceLabel?: string): string {
+  const normalizedBase = baseDir.replace(/\\/g, "/");
   const normalizedFile = filePath.replace(/\\/g, "/");
-  const relative = normalizedFile.startsWith(normalizedClaude)
-    ? normalizedFile.slice(normalizedClaude.length + 1)
-    : path.relative(CLAUDE_DIR, filePath);
+  const relative = normalizedFile.startsWith(normalizedBase)
+    ? normalizedFile.slice(normalizedBase.length + 1)
+    : path.relative(baseDir, filePath);
   const parts = relative.split(/[/\\]/);
   if (parts.length > 0) {
     const slug = parts[0];
@@ -58,12 +80,15 @@ function extractProjectName(filePath: string): string {
       .replace(/---/g, "/")
       .replace(/--/g, "/");
     const segments = cleaned.split(/[-/]/).filter(Boolean);
+    let project: string;
     if (segments.length > 3) {
-      return segments.slice(-3).join("/");
+      project = segments.slice(-3).join("/");
+    } else {
+      project = segments.slice(-2).join("/");
     }
-    return segments.slice(-2).join("/");
+    return sourceLabel ? `[${sourceLabel}] ${project}` : project;
   }
-  return "unknown";
+  return sourceLabel ? `[${sourceLabel}] unknown` : "unknown";
 }
 
 function parseUsage(data: Record<string, unknown>): TokenUsage | null {
@@ -191,16 +216,51 @@ function saveCachedEntries(entries: UsageEntry[]) {
   fs.writeFileSync(CACHE_FILE, JSON.stringify(entries));
 }
 
+interface SourceDir {
+  dir: string;
+  label?: string;
+}
+
+function getSourceDirs(): SourceDir[] {
+  const dirs: SourceDir[] = [{ dir: CLAUDE_DIR }];
+  const sources = loadSources();
+  for (const src of sources) {
+    if (src.enabled && src.path && fs.existsSync(src.path)) {
+      dirs.push({ dir: src.path, label: src.label });
+    }
+  }
+  return dirs;
+}
+
 export function readAllUsageData(): UsageEntry[] {
   const startTime = Date.now();
 
-  if (!fs.existsSync(CLAUDE_DIR)) return [];
+  const sourceDirs = getSourceDirs();
+  const sources = loadSources();
+  const currentSourcesHash = getSourcesHash(sources);
 
-  const allFiles = findJsonlFiles(CLAUDE_DIR);
-  console.log(`[reader] Found ${allFiles.length} JSONL files (${Date.now() - startTime}ms)`);
+  // Collect all JSONL files from all sources, tracking which source each comes from
+  const allFiles: string[] = [];
+  const fileSourceMap = new Map<string, SourceDir>();
+
+  for (const src of sourceDirs) {
+    if (!fs.existsSync(src.dir)) continue;
+    const files = findJsonlFiles(src.dir);
+    for (const file of files) {
+      allFiles.push(file);
+      fileSourceMap.set(file, src);
+    }
+  }
+
+  console.log(
+    `[reader] Found ${allFiles.length} JSONL files across ${sourceDirs.length} source(s) (${Date.now() - startTime}ms)`
+  );
 
   const cacheMeta = loadCacheMeta();
   const cachedFileMap = cacheMeta?.files || {};
+
+  // Invalidate cache if sources config changed
+  const sourcesChanged = cacheMeta?.sourcesHash !== currentSourcesHash;
 
   const newOrChanged: string[] = [];
   const currentFileMap: Record<string, { mtime: number; size: number }> = {};
@@ -209,9 +269,13 @@ export function readAllUsageData(): UsageEntry[] {
     try {
       const stat = fs.statSync(file);
       currentFileMap[file] = { mtime: stat.mtimeMs, size: stat.size };
-      const cached = cachedFileMap[file];
-      if (!cached || cached.mtime !== stat.mtimeMs || cached.size !== stat.size) {
+      if (sourcesChanged) {
         newOrChanged.push(file);
+      } else {
+        const cached = cachedFileMap[file];
+        if (!cached || cached.mtime !== stat.mtimeMs || cached.size !== stat.size) {
+          newOrChanged.push(file);
+        }
       }
     } catch {
       // skip
@@ -221,10 +285,10 @@ export function readAllUsageData(): UsageEntry[] {
   console.log(`[reader] ${allFiles.length - newOrChanged.length} cached, ${newOrChanged.length} new/changed`);
 
   // No changes — return cache
-  if (newOrChanged.length === 0 && cacheMeta) {
+  if (newOrChanged.length === 0 && cacheMeta && !sourcesChanged) {
     const cached = loadCachedEntries();
     if (cached.length > 0) {
-      saveCacheMeta({ files: currentFileMap, lastFullScan: Date.now() });
+      saveCacheMeta({ files: currentFileMap, lastFullScan: Date.now(), sourcesHash: currentSourcesHash });
       console.log(`[reader] Cache hit: ${cached.length} entries (${Date.now() - startTime}ms)`);
       return cached;
     }
@@ -233,7 +297,7 @@ export function readAllUsageData(): UsageEntry[] {
   const seen = new Set<string>();
   let entries: UsageEntry[];
 
-  if (newOrChanged.length < allFiles.length * 0.3 && cacheMeta) {
+  if (!sourcesChanged && newOrChanged.length < allFiles.length * 0.3 && cacheMeta) {
     // Incremental: load cache, remove entries from changed files, process changed
     entries = loadCachedEntries();
     const changedSessionFiles = new Set(newOrChanged.map((f) => path.basename(f, ".jsonl")));
@@ -243,14 +307,16 @@ export function readAllUsageData(): UsageEntry[] {
     entries = entries.filter((e) => !changedSessionFiles.has(e.sessionId));
 
     for (const file of newOrChanged) {
-      entries.push(...processFile(file, extractProjectName(file), seen));
+      const src = fileSourceMap.get(file)!;
+      entries.push(...processFile(file, extractProjectName(file, src.dir, src.label), seen));
     }
     console.log(`[reader] Incremental: processed ${newOrChanged.length} files`);
   } else {
     // Full rebuild
     entries = [];
     for (const file of allFiles) {
-      entries.push(...processFile(file, extractProjectName(file), seen));
+      const src = fileSourceMap.get(file)!;
+      entries.push(...processFile(file, extractProjectName(file, src.dir, src.label), seen));
     }
     console.log(`[reader] Full rebuild: processed ${allFiles.length} files`);
   }
@@ -258,7 +324,7 @@ export function readAllUsageData(): UsageEntry[] {
   entries.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
   saveCachedEntries(entries);
-  saveCacheMeta({ files: currentFileMap, lastFullScan: Date.now() });
+  saveCacheMeta({ files: currentFileMap, lastFullScan: Date.now(), sourcesHash: currentSourcesHash });
 
   console.log(`[reader] Done: ${entries.length} entries in ${Date.now() - startTime}ms`);
   return entries;
