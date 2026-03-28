@@ -181,9 +181,9 @@ export default function Home() {
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
           <h1 className="text-xl font-semibold tracking-tight mb-6">
-            <span className="text-[var(--accent-blue)]">tocken</span>
-            <span className="text-[var(--accent-purple)]">Usage</span>
-            <span className="text-[var(--text-muted)]">C</span>
+            <span className="text-[var(--accent-blue)]">token</span>
+            <span className="text-[var(--accent-purple)]">Use</span>
+            <span className="text-[var(--text-muted)]"> for Claude</span>
           </h1>
           <div className="w-8 h-8 border-2 border-[var(--accent-blue)] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           <p className="text-sm text-[var(--text-muted)]">Loading usage data...</p>
@@ -218,9 +218,9 @@ export default function Home() {
         <div className="p-4 border-b border-[var(--border-subtle)]">
           {sidebarOpen ? (
             <h1 className="text-lg font-semibold tracking-tight">
-              <span className="text-[var(--accent-blue)]">tocken</span>
-              <span className="text-[var(--accent-purple)]">Usage</span>
-              <span className="text-[var(--text-muted)]">C</span>
+              <span className="text-[var(--accent-blue)]">token</span>
+              <span className="text-[var(--accent-purple)]">Use</span>
+              <span className="text-[var(--text-muted)]"> for Claude</span>
             </h1>
           ) : (
             <h1 className="text-lg font-semibold text-center">

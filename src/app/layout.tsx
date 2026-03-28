@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "tockenUsageC — Claude Token Usage Monitor",
+  title: "tokenUse for Claude — Token Usage Monitor",
   description: "Real-time Claude Code token usage analytics dashboard",
 };
 
