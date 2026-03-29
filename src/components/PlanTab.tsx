@@ -15,8 +15,8 @@ import {
   getDefaultLimits,
 } from "@/lib/types";
 import { formatTokens, formatCost, formatDate } from "@/lib/format";
-import { estimateUtilization, findCalibrationAnchor } from "@/lib/calibration";
-import { isInPromoRange, isInPromoSchedule } from "@/lib/utilization";
+import { findCalibrationAnchor, findCalibrationSeries } from "@/lib/calibration";
+import { computeLimitInsight } from "@/lib/limit-insights";
 import { getPlanForDate, getPlanTierForDate, weekKeyFromDate } from "@/lib/plans";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -347,29 +347,31 @@ function WeeklyPlanChart({ weeklyAll, periods, solvedLimits, promoPeriods = [], 
     const tierInfo = tier ? PLAN_TIERS[tier] : null;
 
     let estimatedPct: number | null = null;
-    const solved = solvedLimits["weekly-all"];
     const weekPlanMult = (tierInfo?.multiplier ?? 20) / 20;
     const weekAnchor = findCalibrationAnchor(calibrations, "weekly-all", bucket.weekStart);
-    if (solved && solved.best.confidence > 0) {
-      const est = estimateUtilization(
-        {
-          output: bucket.outputTokens,
-          input: bucket.inputTokens,
-          cacheWrite: bucket.cacheCreationTokens,
-          cacheRead: bucket.cacheReadTokens,
-          total: bucket.totalTokens,
-        },
-        bucket.totalCost,
-        solved,
-        (promoPeriods.length > 0 ? isInPromoSchedule(bucket.weekStart, promoPeriods) : isInPromoRange(bucket.weekStart)) ? "off-peak" : "peak",
-        bucket.weekStart,
-        undefined,
-        promoPeriods,
-        weekPlanMult,
-        weekAnchor
-      );
-      if (est) estimatedPct = est.estimatedPct;
-    }
+    const weekSeries = findCalibrationSeries(calibrations, "weekly-all", bucket.weekStart);
+    const insight = computeLimitInsight({
+      scope: "weekly-all",
+      usage: {
+        outputTokens: bucket.outputTokens,
+        inputTokens: bucket.inputTokens,
+        cacheCreationTokens: bucket.cacheCreationTokens,
+        cacheReadTokens: bucket.cacheReadTokens,
+        totalTokens: bucket.totalTokens,
+        totalCost: bucket.totalCost,
+        peakStatus: bucket.peakStatus ?? "peak",
+        peakSplit: bucket.peakSplit,
+        windowStart: bucket.weekStart,
+      },
+      solvedLimits,
+      derivedLimits: null,
+      promos: promoPeriods,
+      planMultiplier: weekPlanMult,
+      calibrationSeries: weekSeries,
+      calibrationAnchor: weekAnchor,
+      observedPoint: weekAnchor,
+    });
+    estimatedPct = insight.estimatedPct;
 
     const multiplier = tierInfo?.multiplier ?? 1;
     const pctOfMax20 = estimatedPct !== null ? estimatedPct * multiplier : null;

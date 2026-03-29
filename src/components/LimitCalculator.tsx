@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { FiveHourWindow, WeeklyBucket, DerivedLimits, PromoPeriod, DEFAULT_LIMITS_5H } from "@/lib/types";
 import { formatTokens } from "@/lib/format";
-import { saveDerivedLimits, isInPromoRange, isInPromoSchedule } from "@/lib/utilization";
+import { normalizeUsageToBase, rangeHasPromoUsage, saveDerivedLimits } from "@/lib/utilization";
 
 interface Props {
   currentWindow: FiveHourWindow | null;
@@ -68,31 +68,52 @@ export function LimitCalculator({
       ? "Weekly (All Models)"
       : "Weekly (Sonnet)";
 
-  // Determine if current window is during off-peak promo
-  const startTime = currentWindow?.startTime ?? "";
-  const isPromo =
-    target === "5h" &&
-    currentWindow?.peakStatus === "off-peak" &&
-    (promoPeriods.length > 0 ? isInPromoSchedule(startTime, promoPeriods) : isInPromoRange(startTime));
+  const sourceRangeStart =
+    target === "5h"
+      ? currentWindow?.startTime ?? null
+      : target === "weekly-all"
+      ? currentWeekAll?.weekStart ?? null
+      : currentWeekSonnet?.weekStart ?? null;
+  const sourcePeakStatus =
+    target === "5h"
+      ? currentWindow?.peakStatus ?? "peak"
+      : source?.peakStatus ?? "peak";
+  const sourcePeakSplit = source?.peakSplit;
+  const sourceHasPromo =
+    !!source &&
+    !!sourceRangeStart &&
+    rangeHasPromoUsage(sourcePeakStatus, sourceRangeStart, sourcePeakSplit, promoPeriods);
 
-  const weeklySource =
-    target === "weekly-all" ? currentWeekAll : currentWeekSonnet;
-  const isWeeklyPromo =
-    target !== "5h" &&
-    weeklySource &&
-    (promoPeriods.length > 0 ? isInPromoSchedule(weeklySource.weekStart, promoPeriods) : isInPromoRange(weeklySource.weekStart));
+  const normalizedSource =
+    source && sourceRangeStart
+      ? normalizeUsageToBase(
+          {
+            output: source.outputTokens,
+            input: source.inputTokens,
+            cacheWrite: source.cacheCreationTokens,
+            cacheRead: source.cacheReadTokens,
+            total: source.totalTokens,
+            cost:
+              "totalCost" in source && typeof source.totalCost === "number"
+                ? source.totalCost
+                : 0,
+          },
+          sourcePeakStatus,
+          sourceRangeStart,
+          sourcePeakSplit,
+          promoPeriods
+        )
+      : null;
 
   // Calculate derived limits
   const derived: DerivedLimit[] =
-    source && isValid
+    source && normalizedSource && isValid
       ? [
           {
             label: "Output only",
             tokens: deriveLimit(source.outputTokens, pct),
             basedOn: `${formatTokens(source.outputTokens)} output`,
-            baseTokens: isPromo
-              ? Math.round(deriveLimit(source.outputTokens, pct) / 2)
-              : deriveLimit(source.outputTokens, pct),
+            baseTokens: deriveLimit(normalizedSource.output, pct),
           },
           {
             label: "Input + Output",
@@ -101,19 +122,13 @@ export function LimitCalculator({
               pct
             ),
             basedOn: `${formatTokens(source.inputTokens + source.outputTokens)} in+out`,
-            baseTokens: isPromo
-              ? Math.round(
-                  deriveLimit(source.inputTokens + source.outputTokens, pct) / 2
-                )
-              : deriveLimit(source.inputTokens + source.outputTokens, pct),
+            baseTokens: deriveLimit(normalizedSource.input + normalizedSource.output, pct),
           },
           {
             label: "Total (all types)",
             tokens: deriveLimit(source.totalTokens, pct),
             basedOn: `${formatTokens(source.totalTokens)} total`,
-            baseTokens: isPromo
-              ? Math.round(deriveLimit(source.totalTokens, pct) / 2)
-              : deriveLimit(source.totalTokens, pct),
+            baseTokens: deriveLimit(normalizedSource.total, pct),
           },
         ]
       : [];
@@ -133,20 +148,14 @@ export function LimitCalculator({
       weeklyCostLimit: derivedLimits?.weeklyCostLimit ?? null,
       calibratedAt: new Date().toISOString(),
       calibrationPct: pct,
-      promoActive: isPromo || false,
+      promoActive: sourceHasPromo,
     };
 
     // If calibrating weekly, save weekly limits instead
     if (target === "weekly-all" || target === "weekly-sonnet") {
-      newLimits.weeklyOutputLimit = isWeeklyPromo
-        ? Math.round(derived[0].tokens / 2)
-        : derived[0].tokens;
-      newLimits.weeklyInputOutputLimit = isWeeklyPromo
-        ? Math.round(derived[1].tokens / 2)
-        : derived[1].tokens;
-      newLimits.weeklyTotalLimit = isWeeklyPromo
-        ? Math.round(derived[2].tokens / 2)
-        : derived[2].tokens;
+      newLimits.weeklyOutputLimit = derived[0].baseTokens;
+      newLimits.weeklyInputOutputLimit = derived[1].baseTokens;
+      newLimits.weeklyTotalLimit = derived[2].baseTokens;
       // Keep existing 5h limits
       newLimits.outputLimit = derivedLimits?.outputLimit ?? derived[0].baseTokens;
       newLimits.inputOutputLimit = derivedLimits?.inputOutputLimit ?? derived[1].baseTokens;
@@ -155,7 +164,7 @@ export function LimitCalculator({
 
     saveDerivedLimits(newLimits);
     onLimitsChange(newLimits);
-  }, [derived, isValid, pct, isPromo, isWeeklyPromo, target, derivedLimits, onLimitsChange, promoPeriods]);
+  }, [derived, isValid, pct, sourceHasPromo, target, derivedLimits, onLimitsChange]);
 
   // Save on percent change (debounced via derived)
   useEffect(() => {
@@ -258,9 +267,9 @@ export function LimitCalculator({
                 <span className="text-sm font-medium text-[var(--text-primary)] tabular-nums">
                   {formatTokens(d.tokens)}
                 </span>
-                {(isPromo || isWeeklyPromo) && (
+                {sourceHasPromo && (
                   <div className="text-[10px] text-[var(--accent-orange)]">
-                    Base: {formatTokens(d.baseTokens)} (2x promo active)
+                    Base: {formatTokens(d.baseTokens)} (promo removed)
                   </div>
                 )}
               </div>
@@ -268,10 +277,10 @@ export function LimitCalculator({
           ))}
 
           {/* Promo notice */}
-          {(isPromo || isWeeklyPromo) && (
+          {sourceHasPromo && (
             <div className="mt-2 p-2 rounded-lg bg-[var(--accent-orange)]/10 text-[10px] text-[var(--accent-orange)]">
-              Off-peak 2x promotion active (March 13–28). Base limits shown are
-              derived limit / 2.
+              Base limits are recomputed from the same usage with promo removed,
+              not by dividing by a fixed multiplier.
             </div>
           )}
 

@@ -1,65 +1,18 @@
-import { DerivedLimits, Utilization, Bottleneck, PeakStatus, FiveHourWindow, PromoPeriod, DEFAULT_LIMITS_5H, DEFAULT_LIMITS_WEEKLY } from "./types";
+import { DerivedLimits, Utilization, Bottleneck, PeakStatus, FiveHourWindow, PromoPeriod, DEFAULT_LIMITS_5H, DEFAULT_LIMITS_WEEKLY, WeeklyBucket } from "./types";
+import { matchesPromoScheduleInPoland } from "./promo-time";
 
 const STORAGE_KEY = "claude-usage-derived-limits";
 const WEEKLY_STORAGE_KEY = "claude-usage-weekly-limits";
 
 // --- Promo schedule helpers ---
 
-/** Day of month for the Nth occurrence of a weekday (0=Sun) in a given year/month (0-based). */
-function nthWeekdayOfMonthUTC(year: number, month: number, weekday: number, nth: number): number {
-  const firstDayOfMonth = new Date(Date.UTC(year, month, 1)).getUTCDay();
-  const dayOffset = (weekday - firstDayOfMonth + 7) % 7;
-  return 1 + dayOffset + (nth - 1) * 7;
-}
-
-/** Returns the ET UTC offset in hours (4 = EDT, 5 = EST) for a given UTC Date.
- * US DST: 2nd Sunday of March at 2:00 am ET → 1st Sunday of November at 2:00 am ET.
- * 2:00 am EST = 07:00 UTC; 2:00 am EDT = 06:00 UTC.
- */
-function etOffsetHours(date: Date): 4 | 5 {
-  const yr = date.getUTCFullYear();
-  const dstStartDay = nthWeekdayOfMonthUTC(yr, 2, 0, 2); // 2nd Sunday of March
-  const dstEndDay   = nthWeekdayOfMonthUTC(yr, 10, 0, 1); // 1st Sunday of November
-  const dstStart = Date.UTC(yr, 2, dstStartDay, 7);  // 07:00 UTC = 2:00 am EST
-  const dstEnd   = Date.UTC(yr, 10, dstEndDay,  6);  // 06:00 UTC = 2:00 am EDT
-  return (date.getTime() >= dstStart && date.getTime() < dstEnd) ? 4 : 5;
-}
-
-/** Returns the ET hour (0–23) for a UTC Date. */
-function etHour(date: Date): number {
-  return (24 + date.getUTCHours() - etOffsetHours(date)) % 24;
-}
-
-/** Returns the ET day-of-week (0=Sun) for a UTC Date. */
-function etDay(date: Date): number {
-  return new Date(date.getTime() - etOffsetHours(date) * 3_600_000).getUTCDay();
-}
-
 /**
  * Returns true if `date` falls within the given promo schedule.
- * All hour/weekday comparisons use Eastern Time (ET = UTC-4 EDT / UTC-5 EST).
- * Schedule hours stored in PromoPanel are expected to be ET hours.
+ * All hour/weekday comparisons use Polish time (`Europe/Warsaw`).
+ * Schedule hours stored in PromoPanel are expected to be Polish hours.
  */
 function matchesSchedule(date: Date, schedule: import("./types").PromoSchedule): boolean {
-  if (schedule.type === "all-day-all-week") return true;
-
-  const hour = etHour(date); // ET hour (UTC-4 EDT / UTC-5 EST)
-
-  if (schedule.type === "daily-hours") {
-    return hour >= schedule.hourFrom && hour < schedule.hourTo;
-  }
-
-  if (schedule.type === "weekdays") {
-    const day = etDay(date); // 0=Sun, ET
-    if (!schedule.days.includes(day)) return false;
-    if (schedule.hourFrom != null && schedule.hourTo != null) {
-      const inRange = hour >= schedule.hourFrom && hour < schedule.hourTo;
-      return schedule.excludeHours ? !inRange : inRange;
-    }
-    return true;
-  }
-
-  return false;
+  return matchesPromoScheduleInPoland(date, schedule);
 }
 
 /**
@@ -106,8 +59,8 @@ export function isInPromoSchedule(
 /** @deprecated Use isInPromoSchedule with promos array instead */
 export function isInPromoRange(isoTimestamp: string): boolean {
   // Kept for backward compatibility with components that haven't been updated yet
-  const PROMO_START = new Date("2026-03-13T00:00:00-04:00").getTime();
-  const PROMO_END = new Date("2026-03-29T03:59:00-04:00").getTime();
+  const PROMO_START = new Date("2026-03-13T00:00:00+01:00").getTime();
+  const PROMO_END = new Date("2026-03-28T23:59:00+01:00").getTime();
   const t = new Date(isoTimestamp).getTime();
   return t >= PROMO_START && t <= PROMO_END;
 }
@@ -121,6 +74,29 @@ type UsageForNormalization = {
   cost?: number;
 };
 
+export type PromoNormalizationMode = "apply" | "ignore";
+
+export function rangeHasPromoUsage(
+  peakStatus: PeakStatus,
+  rangeStart: string,
+  peakSplit?: FiveHourWindow["peakSplit"] | WeeklyBucket["peakSplit"],
+  promos: PromoPeriod[] = []
+): boolean {
+  if ((peakSplit?.offPeak.totalTokens ?? 0) > 0) {
+    return true;
+  }
+
+  if (peakStatus !== "off-peak") {
+    return false;
+  }
+
+  if (promos.length > 0) {
+    return getActivePromoMultiplier(rangeStart, promos) > 1;
+  }
+
+  return isInPromoRange(rangeStart);
+}
+
 function inferBonusMultiplier(
   windowStart: string,
   peakStatus: PeakStatus,
@@ -129,7 +105,7 @@ function inferBonusMultiplier(
 ): number {
   const activeAtStart =
     promos.length > 0 ? getActivePromoMultiplier(windowStart, promos) : isInPromoRange(windowStart) ? 2 : 1;
-  const hasBonus = !!peakSplit?.offPeak.totalTokens || activeAtStart > 1;
+  const hasBonus = rangeHasPromoUsage(peakStatus, windowStart, peakSplit, promos) || activeAtStart > 1;
   if (!hasBonus) return 1;
 
   if (activeAtStart > 1) return activeAtStart;
@@ -145,9 +121,22 @@ export function normalizeUsageToBase(
   peakStatus: PeakStatus,
   windowStart: string,
   peakSplit?: FiveHourWindow["peakSplit"],
-  promos: PromoPeriod[] = []
+  promos: PromoPeriod[] = [],
+  options?: { promoMode?: PromoNormalizationMode }
 ): Required<UsageForNormalization> {
   const cost = usage.cost ?? 0;
+  const promoMode = options?.promoMode ?? "apply";
+
+  if (promoMode === "ignore") {
+    return {
+      output: usage.output,
+      input: usage.input,
+      cacheWrite: usage.cacheWrite,
+      cacheRead: usage.cacheRead,
+      total: usage.total,
+      cost,
+    };
+  }
 
   if (peakSplit && peakSplit.offPeak.totalTokens > 0) {
     const bonusMultiplier = inferBonusMultiplier(windowStart, peakStatus, peakSplit, promos);
@@ -226,7 +215,8 @@ export function calcUtilization(
   mode: "5h" | "weekly" = "5h",
   peakSplit?: FiveHourWindow["peakSplit"],
   promos?: PromoPeriod[],
-  planMultiplier: number = 1
+  planMultiplier: number = 1,
+  options?: { promoMode?: PromoNormalizationMode }
 ): Utilization | null {
   if (!limits) return null;
 
@@ -260,7 +250,8 @@ export function calcUtilization(
     peakStatus,
     windowStart,
     peakSplit,
-    promos
+    promos,
+    options
   );
 
   const outputPct = (normalized.output / effective.output) * 100;

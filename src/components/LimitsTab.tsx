@@ -14,10 +14,18 @@ import {
   PlanPeriod,
   PLAN_TIERS,
   PromoPeriod,
+  DEFAULT_LIMITS_5H,
+  DEFAULT_LIMITS_WEEKLY,
 } from "@/lib/types";
 import { getPlanTierForDate, weekKeyFromDate } from "@/lib/plans";
 import { formatTokens, formatCost } from "@/lib/format";
-import { estimateUtilization, getCalibrationForWindow, findCalibrationAnchor } from "@/lib/calibration";
+import {
+  estimateUtilization,
+  getCalibrationForWindow,
+  findCalibrationAnchor,
+  findCalibrationSeries,
+} from "@/lib/calibration";
+import { computeLimitInsight } from "@/lib/limit-insights";
 import {
   calcUtilization,
   getActivePromoMultiplier,
@@ -28,6 +36,9 @@ import {
 import { computeWeightedPromoMultiplier } from "@/lib/limits-analyzer";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const EMPTY_PROMO_PERIODS: PromoPeriod[] = [];
+const EMPTY_PLAN_PERIODS: PlanPeriod[] = [];
 
 function formatLocalTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
@@ -57,6 +68,10 @@ function formatWeekRange(weekStart: string, weekEnd: string): string {
   const e = new Date(weekEnd);
   const fmt = (d: Date) => d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" });
   return `${fmt(s)} – ${fmt(e)}`;
+}
+
+function formatPct(value: number | null): string {
+  return value == null ? "—" : `${value.toFixed(1)}%`;
 }
 
 /** Standard ISO week key: YYYY-WNN */
@@ -103,18 +118,23 @@ function getWindowPromoMultiplier(
   return 1;
 }
 
-function getWeeklyPromoMultiplier(
-  bucket: Pick<WeeklyBucket, "weekStart" | "peakStatus" | "peakSplit">,
-  promoPeriods: PromoPeriod[] = []
+function hasSolvedScopeLimits(
+  solvedLimits: Record<CalibrationScope, SolvedLimits> | null,
+  scope: CalibrationScope
+): boolean {
+  const solved = solvedLimits?.[scope];
+  return Boolean(solved && solved.methods.length > 0 && solved.best.confidence > 0);
+}
+
+function getDisplayPlanMultiplier(
+  planTier: PlanPeriod["tier"] | null,
+  solvedLimits: Record<CalibrationScope, SolvedLimits> | null,
+  scope: CalibrationScope
 ): number {
-  if (bucket.peakStatus === "mixed" && bucket.peakSplit) {
-    return computeWeightedPromoMultiplier(bucket.peakSplit);
-  }
-  if (bucket.peakStatus === "off-peak") {
-    const configured = getStartPromoMultiplier(bucket.weekStart, promoPeriods);
-    return configured > 1 ? configured : 1;
-  }
-  return 1;
+  const tierMultiplier = PLAN_TIERS[planTier ?? "max20"].multiplier;
+  return hasSolvedScopeLimits(solvedLimits, scope)
+    ? tierMultiplier / PLAN_TIERS.max20.multiplier
+    : tierMultiplier;
 }
 
 type WeeklyOverrideScope = "all" | "sonnet";
@@ -146,6 +166,89 @@ function getWeeklyOverrideMatch(
 
 // ─── Token breakdown sub-component ───────────────────────────────────────────
 
+// ─── Inline editable value ──────────────────────────────────────────────────
+
+type TokenField = "input" | "output" | "cacheWrite" | "cacheRead";
+
+interface TokenOverrides {
+  input?: number;
+  output?: number;
+  cacheWrite?: number;
+  cacheRead?: number;
+}
+
+function InlineEditableValue({
+  value,
+  overrideValue,
+  formatFn,
+  onCommit,
+  color,
+}: {
+  value: number;
+  overrideValue?: number;
+  formatFn: (n: number) => string;
+  onCommit: (val: number | null) => void;
+  color?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editVal, setEditVal] = useState("");
+  const hasOverride = overrideValue != null;
+  const displayValue = hasOverride ? overrideValue : value;
+
+  const startEdit = () => {
+    setEditVal(String(displayValue));
+    setEditing(true);
+  };
+
+  const commitEdit = () => {
+    setEditing(false);
+    const parsed = parseFloat(editVal);
+    if (isNaN(parsed) || parsed < 0) return;
+    const rounded = Math.round(parsed);
+    if (rounded === value) {
+      if (hasOverride) onCommit(null);
+    } else {
+      onCommit(rounded);
+    }
+  };
+
+  if (editing) {
+    return (
+      <input
+        type="number"
+        value={editVal}
+        onChange={(e) => setEditVal(e.target.value)}
+        onBlur={commitEdit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commitEdit();
+          if (e.key === "Escape") setEditing(false);
+        }}
+        autoFocus
+        step="1000"
+        className="w-20 bg-[var(--bg-primary)] border-2 border-[var(--accent-blue)] rounded px-1 py-0 text-[11px] text-right tabular-nums text-[var(--text-primary)] focus:outline-none"
+      />
+    );
+  }
+
+  return (
+    <span
+      onClick={startEdit}
+      title="Kliknij aby zmienić (what-if)"
+      className={`group/val inline-flex items-center gap-0.5 tabular-nums text-right cursor-pointer rounded px-1 -mx-1 py-0.5 transition-colors hover:bg-[var(--accent-blue)]/10 ${
+        hasOverride ? "border-b-2 border-dashed border-[var(--accent-blue)]" : ""
+      }`}
+      style={{ color: hasOverride ? "var(--accent-blue)" : color ?? "var(--text-secondary)" }}
+    >
+      <span className="w-16 text-right">{formatFn(displayValue)}</span>
+      <svg className="w-2.5 h-2.5 opacity-0 group-hover/val:opacity-50 transition-opacity shrink-0" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M12.1 1.3a1 1 0 0 1 1.4 0l1.2 1.2a1 1 0 0 1 0 1.4l-8.5 8.5-3.2.8.8-3.2 8.3-8.7zm.7.7L4.5 10.3l-.4 1.6 1.6-.4L14 3.2 12.8 2z"/>
+      </svg>
+    </span>
+  );
+}
+
+// ─── Token breakdown sub-component ───────────────────────────────────────────
+
 interface TokenBreakdownProps {
   inputTokens: number;
   outputTokens: number;
@@ -161,6 +264,9 @@ interface TokenBreakdownProps {
   windowStart?: string;
   promoPeriods?: PromoPeriod[];
   planMultiplier?: number;
+  /** Ad-hoc overrides for what-if simulation */
+  overrides?: TokenOverrides;
+  onOverride?: (field: TokenField, value: number | null) => void;
 }
 
 function TokenBreakdown({
@@ -177,8 +283,22 @@ function TokenBreakdown({
   peakSplit,
   windowStart = new Date().toISOString(),
   planMultiplier = 1,
-  promoPeriods = [],
+  promoPeriods = EMPTY_PROMO_PERIODS,
+  overrides,
+  onOverride,
 }: TokenBreakdownProps) {
+  // Apply overrides for what-if simulation
+  const effInput = overrides?.input ?? inputTokens;
+  const effOutput = overrides?.output ?? outputTokens;
+  const effCacheWrite = overrides?.cacheWrite ?? cacheCreationTokens;
+  const effCacheRead = overrides?.cacheRead ?? cacheReadTokens;
+  const effTotal = effInput + effOutput + effCacheWrite + effCacheRead;
+  const hasAnyOverride = overrides && (overrides.input != null || overrides.output != null || overrides.cacheWrite != null || overrides.cacheRead != null);
+
+  // Estimate cost proportionally if tokens changed
+  const costScale = totalTokens > 0 ? effTotal / totalTokens : 1;
+  const effCost = (totalCost ?? 0) * costScale;
+
   // Try to compute per-type % of limit
   let outputPct: number | null = null;
   let ioPct: number | null = null;
@@ -189,8 +309,8 @@ function TokenBreakdown({
     const solved = solvedLimits[scope];
     if (solved && solved.best.confidence > 0) {
       const est = estimateUtilization(
-        { output: outputTokens, input: inputTokens, cacheWrite: cacheCreationTokens, cacheRead: cacheReadTokens, total: totalTokens },
-        totalCost ?? 0,
+        { output: effOutput, input: effInput, cacheWrite: effCacheWrite, cacheRead: effCacheRead, total: effTotal },
+        effCost,
         solved,
         peakStatus,
         windowStart,
@@ -209,7 +329,7 @@ function TokenBreakdown({
 
   if (outputPct === null && derivedLimits) {
     const util = calcUtilization(
-      { outputTokens, inputTokens, totalTokens },
+      { outputTokens: effOutput, inputTokens: effInput, totalTokens: effTotal },
       derivedLimits,
       peakStatus,
       windowStart,
@@ -226,24 +346,50 @@ function TokenBreakdown({
     }
   }
 
-  const rows: { label: string; value: number; color: string; pct?: number | null; isBn: boolean }[] = [
-    { label: "Input", value: inputTokens, color: "var(--accent-blue)", isBn: false },
-    { label: "Output", value: outputTokens, color: "var(--accent-green)", pct: outputPct, isBn: bottleneck === "output" },
-    { label: "Cache Write", value: cacheCreationTokens, color: "var(--accent-purple)", isBn: false },
-    { label: "Cache Read", value: cacheReadTokens, color: "var(--accent-cyan)", isBn: false },
+  const rows: { label: string; field: TokenField; original: number; value: number; color: string; pct?: number | null; isBn: boolean }[] = [
+    { label: "Input", field: "input", original: inputTokens, value: effInput, color: "var(--accent-blue)", isBn: false },
+    { label: "Output", field: "output", original: outputTokens, value: effOutput, color: "var(--accent-green)", pct: outputPct, isBn: bottleneck === "output" },
+    { label: "Cache Write", field: "cacheWrite", original: cacheCreationTokens, value: effCacheWrite, color: "var(--accent-purple)", isBn: false },
+    { label: "Cache Read", field: "cacheRead", original: cacheReadTokens, value: effCacheRead, color: "var(--accent-cyan)", isBn: false },
   ];
 
   return (
     <div className="space-y-2">
+      {hasAnyOverride && onOverride && (
+        <div className="flex items-center justify-between text-[9px]">
+          <span className="text-[var(--accent-blue)] font-medium">what-if mode</span>
+          <button
+            onClick={() => {
+              onOverride("input", null);
+              onOverride("output", null);
+              onOverride("cacheWrite", null);
+              onOverride("cacheRead", null);
+            }}
+            className="text-[var(--text-muted)] hover:text-[var(--accent-red)] transition-colors"
+          >
+            reset
+          </button>
+        </div>
+      )}
       {rows.map((r) => {
-        const barWidth = totalTokens > 0 ? (r.value / totalTokens) * 100 : 0;
+        const barWidth = effTotal > 0 ? (r.value / effTotal) * 100 : 0;
         return (
           <div key={r.label} className="flex items-center gap-2 text-xs">
             <span className="w-20 text-[var(--text-muted)] text-right shrink-0">{r.label}</span>
             <div className="flex-1 h-2.5 bg-[var(--bg-primary)] rounded-full overflow-hidden">
               <div className="h-full rounded-full" style={{ width: `${Math.min(barWidth, 100)}%`, background: r.color }} />
             </div>
-            <span className="w-16 text-[var(--text-secondary)] tabular-nums text-right">{formatTokens(r.value)}</span>
+            {onOverride ? (
+              <InlineEditableValue
+                value={r.original}
+                overrideValue={overrides?.[r.field]}
+                formatFn={formatTokens}
+                onCommit={(val) => onOverride(r.field, val)}
+                color="var(--text-secondary)"
+              />
+            ) : (
+              <span className="w-16 text-[var(--text-secondary)] tabular-nums text-right">{formatTokens(r.value)}</span>
+            )}
           </div>
         );
       })}
@@ -276,14 +422,83 @@ function TokenBreakdown({
       {/* Total row */}
       <div className="flex justify-between pt-1 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)]">
         <span className="font-medium text-[var(--text-secondary)] tabular-nums">
-          {formatTokens(totalTokens)} total
+          {formatTokens(effTotal)} total
+          {hasAnyOverride && (
+            <span className="text-[var(--accent-blue)] ml-1">(sim)</span>
+          )}
         </span>
         {totalCost != null && (
           <span className="font-medium text-[var(--text-secondary)] tabular-nums">
-            {formatCost(totalCost)}
+            {formatCost(effCost)}
+            {hasAnyOverride && (
+              <span className="text-[var(--accent-blue)] ml-1">(~)</span>
+            )}
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+function ValidationSummary({
+  estimatedPct,
+  observedPct,
+  deltaPct,
+  noPromoPct,
+  observedAt,
+}: {
+  estimatedPct: number | null;
+  observedPct: number | null;
+  deltaPct: number | null;
+  noPromoPct: number | null;
+  observedAt?: string | null;
+}) {
+  if (
+    estimatedPct == null &&
+    observedPct == null &&
+    deltaPct == null &&
+    noPromoPct == null
+  ) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[var(--border-subtle)] text-[10px]">
+      {estimatedPct != null && (
+        <span className="px-2 py-1 rounded bg-[var(--bg-primary)] text-[var(--text-secondary)]">
+          Est. {formatPct(estimatedPct)}
+        </span>
+      )}
+      {observedPct != null && (
+        <span className="px-2 py-1 rounded bg-[var(--bg-primary)] text-[var(--accent-blue)]">
+          Obs. {formatPct(observedPct)}
+        </span>
+      )}
+      {deltaPct != null && (
+        <span
+          className="px-2 py-1 rounded"
+          style={{
+            background:
+              deltaPct >= 0
+                ? "color-mix(in srgb, var(--accent-green) 12%, transparent)"
+                : "color-mix(in srgb, var(--accent-orange) 12%, transparent)",
+            color: deltaPct >= 0 ? "var(--accent-green)" : "var(--accent-orange)",
+          }}
+        >
+          Δ {deltaPct > 0 ? "+" : ""}
+          {formatPct(deltaPct)}
+        </span>
+      )}
+      {noPromoPct != null && (
+        <span className="px-2 py-1 rounded bg-[var(--bg-primary)] text-[var(--accent-orange)]">
+          No promo {formatPct(noPromoPct)}
+        </span>
+      )}
+      {observedAt && (
+        <span className="text-[var(--text-muted)]">
+          obs @ {formatLocalTime(observedAt)} {formatShortDate(observedAt)}
+        </span>
+      )}
     </div>
   );
 }
@@ -308,9 +523,11 @@ function EditBoundariesDialog({
   onClose,
 }: EditDialogProps) {
   const [mounted, setMounted] = useState(false);
-  const [start, setStart] = useState(toDatetimeLocal(initialStart));
-  const [end, setEnd] = useState(toDatetimeLocal(initialEnd));
+  const [start, setStart] = useState(() => toDatetimeLocal(initialStart));
+  const [end, setEnd] = useState(() => toDatetimeLocal(initialEnd));
   const [saving, setSaving] = useState(false);
+  const startInputId = `${type}-${overrideKey}-start`;
+  const endInputId = `${type}-${overrideKey}-end`;
 
   useEffect(() => {
     setMounted(true);
@@ -341,8 +558,9 @@ function EditBoundariesDialog({
 
         <div className="space-y-3 mb-5">
           <div>
-            <label className="block text-xs text-[var(--text-muted)] mb-1">Start</label>
+            <label htmlFor={startInputId} className="block text-xs text-[var(--text-muted)] mb-1">Start</label>
             <input
+              id={startInputId}
               type="datetime-local"
               value={start}
               onChange={(e) => setStart(e.target.value)}
@@ -350,8 +568,9 @@ function EditBoundariesDialog({
             />
           </div>
           <div>
-            <label className="block text-xs text-[var(--text-muted)] mb-1">End</label>
+            <label htmlFor={endInputId} className="block text-xs text-[var(--text-muted)] mb-1">End</label>
             <input
+              id={endInputId}
               type="datetime-local"
               value={end}
               onChange={(e) => setEnd(e.target.value)}
@@ -386,20 +605,145 @@ function EditBoundariesDialog({
 interface StatusCardsProps {
   currentWindow: FiveHourWindow | null;
   currentWeekAll: WeeklyBucket | null;
+  currentWeekSonnet: WeeklyBucket | null;
   solvedLimits: Record<CalibrationScope, SolvedLimits> | null;
   derivedLimits: DerivedLimits | null;
+  calibrations: CalibrationPoint[];
+  planPeriods?: PlanPeriod[];
   promoPeriods?: PromoPeriod[];
 }
 
 function StatusCards({
   currentWindow,
   currentWeekAll,
+  currentWeekSonnet,
   solvedLimits,
   derivedLimits,
-  promoPeriods = [],
+  calibrations,
+  planPeriods = EMPTY_PLAN_PERIODS,
+  promoPeriods = EMPTY_PROMO_PERIODS,
 }: StatusCardsProps) {
   const [windowRemaining, setWindowRemaining] = useState(currentWindow?.timeRemainingMs ?? 0);
   const [weekRemaining, setWeekRemaining] = useState(currentWeekAll?.timeRemainingMs ?? 0);
+  const [weekSonnetRemaining, setWeekSonnetRemaining] = useState(currentWeekSonnet?.timeRemainingMs ?? 0);
+
+  // What-if overrides per card
+  const [windowOv, setWindowOv] = useState<TokenOverrides>({});
+  const [weekAllOv, setWeekAllOv] = useState<TokenOverrides>({});
+  const [weekSonnetOv, setWeekSonnetOv] = useState<TokenOverrides>({});
+
+  const makeOverrideHandler = (setter: React.Dispatch<React.SetStateAction<TokenOverrides>>) =>
+    (field: TokenField, value: number | null) => {
+      setter((prev) => {
+        const next = { ...prev };
+        if (value === null) {
+          delete next[field];
+        } else {
+          next[field] = value;
+        }
+        return next;
+      });
+    };
+
+  const currentWindowPlanTier = currentWindow && planPeriods
+    ? getPlanTierForDate(currentWindow.startTime, planPeriods)
+    : null;
+  const currentWeekPlanTier = currentWeekAll && planPeriods
+    ? getPlanTierForDate(currentWeekAll.weekStart, planPeriods)
+    : null;
+  const currentWeekSonnetPlanTier = currentWeekSonnet && planPeriods
+    ? getPlanTierForDate(currentWeekSonnet.weekStart, planPeriods)
+    : null;
+  const currentWindowPlanMult = getDisplayPlanMultiplier(currentWindowPlanTier, solvedLimits, "5h");
+  const currentWeekPlanMult = getDisplayPlanMultiplier(currentWeekPlanTier, solvedLimits, "weekly-all");
+  const currentWeekSonnetPlanMult = getDisplayPlanMultiplier(currentWeekSonnetPlanTier, solvedLimits, "weekly-sonnet");
+  const currentWindowAnchor = currentWindow
+    ? findCalibrationAnchor(calibrations, "5h", currentWindow.startTime)
+    : undefined;
+  const currentWindowSeries = currentWindow
+    ? findCalibrationSeries(calibrations, "5h", currentWindow.startTime)
+    : [];
+  const currentWeekAnchor = currentWeekAll
+    ? findCalibrationAnchor(calibrations, "weekly-all", currentWeekAll.weekStart)
+    : undefined;
+  const currentWeekSeries = currentWeekAll
+    ? findCalibrationSeries(calibrations, "weekly-all", currentWeekAll.weekStart)
+    : [];
+  const currentWeekSonnetAnchor = currentWeekSonnet
+    ? findCalibrationAnchor(calibrations, "weekly-sonnet", currentWeekSonnet.weekStart)
+    : undefined;
+  const currentWeekSonnetSeries = currentWeekSonnet
+    ? findCalibrationSeries(calibrations, "weekly-sonnet", currentWeekSonnet.weekStart)
+    : [];
+  const currentWindowInsight = currentWindow
+    ? computeLimitInsight({
+        scope: "5h",
+        usage: {
+          outputTokens: currentWindow.outputTokens,
+          inputTokens: currentWindow.inputTokens,
+          cacheCreationTokens: currentWindow.cacheCreationTokens,
+          cacheReadTokens: currentWindow.cacheReadTokens,
+          totalTokens: currentWindow.totalTokens,
+          totalCost: currentWindow.totalCost,
+          peakStatus: currentWindow.peakStatus,
+          peakSplit: currentWindow.peakSplit,
+          windowStart: currentWindow.startTime,
+        },
+        solvedLimits,
+        derivedLimits,
+        promos: promoPeriods,
+        planMultiplier: currentWindowPlanMult,
+        calibrationSeries: currentWindowSeries,
+        calibrationAnchor: currentWindowAnchor,
+        observedPoint: currentWindowAnchor,
+      })
+    : null;
+  const currentWeekInsight = currentWeekAll
+    ? computeLimitInsight({
+        scope: "weekly-all",
+        usage: {
+          outputTokens: currentWeekAll.outputTokens,
+          inputTokens: currentWeekAll.inputTokens,
+          cacheCreationTokens: currentWeekAll.cacheCreationTokens,
+          cacheReadTokens: currentWeekAll.cacheReadTokens,
+          totalTokens: currentWeekAll.totalTokens,
+          totalCost: currentWeekAll.totalCost,
+          peakStatus: currentWeekAll.peakStatus ?? "peak",
+          peakSplit: currentWeekAll.peakSplit,
+          windowStart: currentWeekAll.weekStart,
+        },
+        solvedLimits,
+        derivedLimits,
+        promos: promoPeriods,
+        planMultiplier: currentWeekPlanMult,
+        calibrationSeries: currentWeekSeries,
+        calibrationAnchor: currentWeekAnchor,
+        observedPoint: currentWeekAnchor,
+      })
+    : null;
+  const currentWeekSonnetInsight = currentWeekSonnet
+    ? computeLimitInsight({
+        scope: "weekly-sonnet",
+        usage: {
+          outputTokens: currentWeekSonnet.outputTokens,
+          inputTokens: currentWeekSonnet.inputTokens,
+          cacheCreationTokens: currentWeekSonnet.cacheCreationTokens,
+          cacheReadTokens: currentWeekSonnet.cacheReadTokens,
+          totalTokens: currentWeekSonnet.totalTokens,
+          totalCost: currentWeekSonnet.totalCost,
+          peakStatus: currentWeekSonnet.peakStatus ?? "peak",
+          peakSplit: currentWeekSonnet.peakSplit,
+          windowStart: currentWeekSonnet.weekStart,
+        },
+        solvedLimits,
+        derivedLimits,
+        promos: promoPeriods,
+        planMultiplier: currentWeekSonnetPlanMult,
+        calibrationSeries: currentWeekSonnetSeries,
+        calibrationAnchor: currentWeekSonnetAnchor,
+        observedPoint: currentWeekSonnetAnchor,
+      })
+    : null;
 
   useEffect(() => {
     if (!currentWindow && !currentWeekAll) return;
@@ -410,14 +754,17 @@ function StatusCards({
       if (currentWeekAll && currentWeekAll.timeRemainingMs > 0) {
         setWeekRemaining(Math.max(0, new Date(currentWeekAll.weekEnd).getTime() - Date.now()));
       }
+      if (currentWeekSonnet && currentWeekSonnet.timeRemainingMs > 0) {
+        setWeekSonnetRemaining(Math.max(0, new Date(currentWeekSonnet.weekEnd).getTime() - Date.now()));
+      }
     };
     tick();
     const iv = setInterval(tick, 1000);
     return () => clearInterval(iv);
-  }, [currentWindow, currentWeekAll]);
+  }, [currentWindow, currentWeekAll, currentWeekSonnet]);
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6">
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
       {/* Card 1: Active 5h Window */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-4">
@@ -457,16 +804,28 @@ function StatusCards({
               peakStatus={currentWindow.peakStatus}
               peakSplit={currentWindow.peakSplit}
               windowStart={currentWindow.startTime}
+              planMultiplier={currentWindowPlanMult}
               promoPeriods={promoPeriods}
+              overrides={windowOv}
+              onOverride={makeOverrideHandler(setWindowOv)}
             />
+            {currentWindowInsight && (
+              <ValidationSummary
+                estimatedPct={currentWindowInsight.estimatedPct}
+                observedPct={currentWindowInsight.observedPct}
+                deltaPct={currentWindowInsight.deltaPct}
+                noPromoPct={currentWindowInsight.noPromoPct}
+                observedAt={currentWindowInsight.observedAt}
+              />
+            )}
           </>
         )}
       </div>
 
-      {/* Card 2: Current Week */}
+      {/* Card 2: Current Week ALL */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-medium text-[var(--text-secondary)]">Current Week</h3>
+          <h3 className="text-sm font-medium text-[var(--text-secondary)]">Current Week ALL</h3>
           {currentWeekAll && weekRemaining > 0 ? (
             <span className="text-xs text-[var(--accent-orange)] font-mono">
               Resets in {formatTimeRemaining(weekRemaining)}
@@ -494,8 +853,69 @@ function StatusCards({
               peakStatus={currentWeekAll.peakStatus ?? "peak"}
               peakSplit={currentWeekAll.peakSplit}
               windowStart={currentWeekAll.weekStart}
+              planMultiplier={currentWeekPlanMult}
               promoPeriods={promoPeriods}
+              overrides={weekAllOv}
+              onOverride={makeOverrideHandler(setWeekAllOv)}
             />
+            {currentWeekInsight && (
+              <ValidationSummary
+                estimatedPct={currentWeekInsight.estimatedPct}
+                observedPct={currentWeekInsight.observedPct}
+                deltaPct={currentWeekInsight.deltaPct}
+                noPromoPct={currentWeekInsight.noPromoPct}
+                observedAt={currentWeekInsight.observedAt}
+              />
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Card 3: Current Week Sonnet */}
+      <div className="card p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-medium text-[var(--text-secondary)]">Current Week SNNT</h3>
+          {currentWeekSonnet && weekSonnetRemaining > 0 ? (
+            <span className="text-xs text-[var(--accent-orange)] font-mono">
+              Resets in {formatTimeRemaining(weekSonnetRemaining)}
+            </span>
+          ) : null}
+        </div>
+
+        {!currentWeekSonnet ? (
+          <p className="text-[var(--text-muted)] text-sm">No Sonnet usage in current weekly cycle</p>
+        ) : (
+          <>
+            <div className="text-xs text-[var(--text-muted)] mb-3">
+              {formatWeekRange(currentWeekSonnet.weekStart, currentWeekSonnet.weekEnd)}
+            </div>
+            <TokenBreakdown
+              inputTokens={currentWeekSonnet.inputTokens}
+              outputTokens={currentWeekSonnet.outputTokens}
+              cacheCreationTokens={currentWeekSonnet.cacheCreationTokens}
+              cacheReadTokens={currentWeekSonnet.cacheReadTokens}
+              totalTokens={currentWeekSonnet.totalTokens}
+              totalCost={currentWeekSonnet.totalCost}
+              solvedLimits={solvedLimits}
+              derivedLimits={derivedLimits}
+              scope="weekly-sonnet"
+              peakStatus={currentWeekSonnet.peakStatus ?? "peak"}
+              peakSplit={currentWeekSonnet.peakSplit}
+              windowStart={currentWeekSonnet.weekStart}
+              planMultiplier={currentWeekSonnetPlanMult}
+              promoPeriods={promoPeriods}
+              overrides={weekSonnetOv}
+              onOverride={makeOverrideHandler(setWeekSonnetOv)}
+            />
+            {currentWeekSonnetInsight && (
+              <ValidationSummary
+                estimatedPct={currentWeekSonnetInsight.estimatedPct}
+                observedPct={currentWeekSonnetInsight.observedPct}
+                deltaPct={currentWeekSonnetInsight.deltaPct}
+                noPromoPct={currentWeekSonnetInsight.noPromoPct}
+                observedAt={currentWeekSonnetInsight.observedAt}
+              />
+            )}
           </>
         )}
       </div>
@@ -634,7 +1054,7 @@ interface FiveHourAccordionProps {
   promoPeriods?: PromoPeriod[];
 }
 
-function FiveHourAccordion({ windows, solvedLimits, derivedLimits, overrides, onSaveOverride, promoPeriods = [] }: FiveHourAccordionProps) {
+function FiveHourAccordion({ windows, solvedLimits, derivedLimits, overrides, onSaveOverride, promoPeriods = EMPTY_PROMO_PERIODS }: FiveHourAccordionProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [editKey, setEditKey] = useState<string | null>(null);
 
@@ -773,6 +1193,7 @@ interface WindowRowProps {
   maxTokens: number;
   promoPeriods?: PromoPeriod[];
   planMultiplier?: number;
+  calibrationSeries?: CalibrationPoint[];
   calibrationAnchor?: CalibrationPoint;
 }
 
@@ -785,8 +1206,9 @@ function WindowRow({
   onEditBoundaries,
   viewMode,
   maxTokens,
-  promoPeriods = [],
+  promoPeriods = EMPTY_PROMO_PERIODS,
   planMultiplier = 1,
+  calibrationSeries = [],
   calibrationAnchor,
 }: WindowRowProps) {
   const [expanded, setExpanded] = useState(false);
@@ -794,66 +1216,42 @@ function WindowRow({
   const override = overrides["5h"][win.startTime];
   const displayStart = override?.start ?? win.startTime;
   const displayEnd = override?.end ?? win.endTime;
+  const calibrationPoint = calibrationAnchor ?? getCalibrationForWindow(win.id, calibrations);
+  const insight = computeLimitInsight({
+    scope: "5h",
+    usage: {
+      outputTokens: win.outputTokens,
+      inputTokens: win.inputTokens,
+      cacheCreationTokens: win.cacheCreationTokens,
+      cacheReadTokens: win.cacheReadTokens,
+      totalTokens: win.totalTokens,
+      totalCost: win.totalCost,
+      peakStatus: win.peakStatus,
+      peakSplit: win.peakSplit,
+      windowStart: win.startTime,
+    },
+    solvedLimits,
+    derivedLimits,
+    promos: promoPeriods,
+    planMultiplier,
+    calibrationSeries,
+    calibrationAnchor,
+    observedPoint: calibrationPoint,
+  });
 
   // Compute utilization
-  let displayPct: number | null = null;
+  let displayPct: number | null = insight.estimatedPct;
   let bottleneckColor = "var(--accent-blue)";
   let bottleneckLabel = "";
-  let isCalibrated = false;
-  let basePct: number | null = null;
+  const isCalibrated = !!calibrationPoint;
+  const basePct = insight.noPromoPct;
 
-  // Try solvedLimits first
-  if (solvedLimits && solvedLimits["5h"].best.confidence > 0) {
-    const est = estimateUtilization(
-      {
-        output: win.outputTokens,
-        input: win.inputTokens,
-        cacheWrite: win.cacheCreationTokens,
-        cacheRead: win.cacheReadTokens,
-        total: win.totalTokens,
-      },
-      win.totalCost,
-      solvedLimits["5h"],
-      win.peakStatus,
-      win.startTime,
-      win.peakSplit,
-      promoPeriods,
-      planMultiplier,
-      calibrationAnchor
-    );
-    if (est) {
-      displayPct = est.estimatedPct;
-      bottleneckColor = BOTTLENECK_COLORS[est.bottleneck as keyof typeof BOTTLENECK_COLORS] ?? "var(--accent-blue)";
-      bottleneckLabel = BOTTLENECK_LABELS[est.bottleneck as keyof typeof BOTTLENECK_LABELS] ?? "";
-    }
-  }
-
-  // Fallback: derivedLimits
-  if (displayPct === null && derivedLimits) {
-    const util = calcUtilization(
-      { outputTokens: win.outputTokens, inputTokens: win.inputTokens, totalTokens: win.totalTokens },
-      derivedLimits,
-      win.peakStatus,
-      win.startTime,
-      "5h",
-      win.peakSplit,
-      promoPeriods,
-      planMultiplier
-    );
-    if (util) {
-      displayPct = util.effectivePct;
-      bottleneckColor = BOTTLENECK_COLORS[util.bottleneck as keyof typeof BOTTLENECK_COLORS] ?? "var(--accent-blue)";
-      bottleneckLabel = BOTTLENECK_LABELS[util.bottleneck as keyof typeof BOTTLENECK_LABELS] ?? "";
-    }
-  }
-
-  // Check if calibrated for this window
-  const cal = getCalibrationForWindow(win.id, calibrations);
-  isCalibrated = !!cal;
-
-  const promoMultiplier = getWindowPromoMultiplier(win, promoPeriods);
-  if (displayPct !== null && promoMultiplier > 1) {
-    basePct = displayPct * promoMultiplier;
+  if (insight.bottleneck) {
+    bottleneckColor =
+      BOTTLENECK_COLORS[insight.bottleneck as keyof typeof BOTTLENECK_COLORS] ??
+      "var(--accent-blue)";
+    bottleneckLabel =
+      BOTTLENECK_LABELS[insight.bottleneck as keyof typeof BOTTLENECK_LABELS] ?? "";
   }
 
   const tokens = viewMode === "output" ? win.outputTokens : win.totalTokens;
@@ -882,7 +1280,7 @@ function WindowRow({
 
           {/* Progress bar */}
           <div className="flex-1 h-5 bg-[var(--bg-primary)] rounded overflow-hidden relative">
-            {promoMultiplier > 1 && displayPct !== null ? (
+            {insight.promoActive && displayPct !== null && basePct !== null ? (
               <>
                 <div
                   className="absolute inset-y-0 left-0 rounded-l transition-all duration-300"
@@ -892,7 +1290,7 @@ function WindowRow({
                   className="absolute inset-y-0 transition-all duration-300"
                   style={{
                     left: `${barWidth}%`,
-                    width: `${Math.min((basePct ?? 0) - barWidth, 100 - barWidth)}%`,
+                    width: `${Math.max(0, Math.min(basePct - barWidth, 100 - barWidth))}%`,
                     background: barColor,
                     opacity: 0.3,
                   }}
@@ -913,11 +1311,11 @@ function WindowRow({
               style={{ color: bottleneckColor }}
             >
               {isCalibrated && <span className="text-[8px] text-[var(--accent-green)] mr-0.5">●</span>}
-              {basePct !== null ? (
+              {insight.promoActive && basePct !== null ? (
                 <>
                   {displayPct.toFixed(0)}%{" "}
                   <span className="text-[var(--accent-orange)]">
-                    ({basePct.toFixed(0)}%<span className="text-[9px]"> Bonus {promoMultiplier}x</span>)
+                    ({basePct.toFixed(0)}%<span className="text-[9px]"> no promo</span>)
                   </span>
                 </>
               ) : (
@@ -957,6 +1355,13 @@ function WindowRow({
             windowStart={win.startTime}
             promoPeriods={promoPeriods}
             planMultiplier={planMultiplier}
+          />
+          <ValidationSummary
+            estimatedPct={insight.estimatedPct}
+            observedPct={insight.observedPct}
+            deltaPct={insight.deltaPct}
+            noPromoPct={insight.noPromoPct}
+            observedAt={insight.observedAt}
           />
 
           {/* Meta row */}
@@ -1016,11 +1421,14 @@ function WeeklyWindowsView({
   calibrations,
   overrides,
   onSaveOverride,
-  planPeriods,
-  promoPeriods = [],
+  planPeriods = EMPTY_PLAN_PERIODS,
+  promoPeriods = EMPTY_PROMO_PERIODS,
 }: WeeklyWindowsViewProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("output");
   const [editKey, setEditKey] = useState<string | null>(null);
+  const promoActiveNowLocal = promoPeriods.length > 0
+    ? getActivePromoMultiplier(new Date().toISOString(), promoPeriods) > 1
+    : isInPromoRange(new Date().toISOString());
   const sorted = [...windows].sort(
     (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
   );
@@ -1042,92 +1450,71 @@ function WeeklyWindowsView({
     return Math.max(0, end - start);
   };
 
-  const formatPromoMultiplier = (value: number): string =>
-    Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2).replace(/\.?0+$/, "");
-
   const computeBucketEstimate = (
     bucket: WeeklyBucket | null,
     scope: "weekly-all" | "weekly-sonnet",
     planMult: number = 1,
+    series: CalibrationPoint[] = [],
     anchor?: CalibrationPoint
   ): {
     displayPct: number;
-    basePct: number | null;
+    noPromoPct: number | null;
     color: string;
     label: string;
-    promoMultiplier: number;
+    observedPct: number | null;
+    deltaPct: number | null;
+    observedAt: string | null;
+    historicalPromoInCycle: boolean;
   } | null => {
     if (!bucket) return null;
 
-    const peakStatus = bucket.peakStatus ?? "peak";
-    const peakSplit = bucket.peakSplit;
-    const promoMultiplier = getWeeklyPromoMultiplier(bucket, promoPeriods);
+    const nowIso = new Date().toISOString();
+    const promoActiveNow = promoPeriods.length > 0
+      ? getActivePromoMultiplier(nowIso, promoPeriods) > 1
+      : isInPromoRange(nowIso);
+    const hasPromoUsageInBucket = (bucket.peakSplit?.offPeak.totalTokens ?? 0) > 0;
 
-    const solved = solvedLimits?.[scope];
-    if (solved && solved.best.confidence > 0) {
-      const est = estimateUtilization(
-        {
-          output: bucket.outputTokens,
-          input: bucket.inputTokens,
-          cacheWrite: bucket.cacheCreationTokens,
-          cacheRead: bucket.cacheReadTokens,
-          total: bucket.totalTokens,
-        },
-        bucket.totalCost,
-        solved,
-        peakStatus,
-        bucket.weekStart,
-        peakSplit,
-        promoPeriods,
-        planMult,
-        anchor
-      );
-      if (est) {
-        return {
-          displayPct: est.estimatedPct,
-          basePct: promoMultiplier > 1 ? est.estimatedPct * promoMultiplier : null,
-          color:
-            BOTTLENECK_COLORS[est.bottleneck as keyof typeof BOTTLENECK_COLORS] ??
-            "var(--accent-orange)",
-          label:
-            BOTTLENECK_LABELS[est.bottleneck as keyof typeof BOTTLENECK_LABELS] ??
-            "",
-          promoMultiplier,
-        };
-      }
-    }
+    const insight = computeLimitInsight({
+      scope,
+      usage: {
+        outputTokens: bucket.outputTokens,
+        inputTokens: bucket.inputTokens,
+        cacheCreationTokens: bucket.cacheCreationTokens,
+        cacheReadTokens: bucket.cacheReadTokens,
+        totalTokens: bucket.totalTokens,
+        totalCost: bucket.totalCost,
+        peakStatus: bucket.peakStatus ?? "peak",
+        peakSplit: bucket.peakSplit,
+        windowStart: bucket.weekStart,
+      },
+      solvedLimits,
+      derivedLimits,
+      promos: promoPeriods,
+      planMultiplier: planMult,
+      calibrationSeries: series,
+      calibrationAnchor: anchor,
+      observedPoint: anchor,
+    });
 
-    if (derivedLimits) {
-      const util = calcUtilization(
-        {
-          outputTokens: bucket.outputTokens,
-          inputTokens: bucket.inputTokens,
-          totalTokens: bucket.totalTokens,
-        },
-        derivedLimits,
-        peakStatus,
-        bucket.weekStart,
-        "weekly",
-        peakSplit,
-        promoPeriods,
-        planMult
-      );
-      if (util) {
-        return {
-          displayPct: util.effectivePct,
-          basePct: promoMultiplier > 1 ? util.effectivePct * promoMultiplier : null,
-          color:
-            BOTTLENECK_COLORS[util.bottleneck as keyof typeof BOTTLENECK_COLORS] ??
-            "var(--accent-orange)",
-          label:
-            BOTTLENECK_LABELS[util.bottleneck as keyof typeof BOTTLENECK_LABELS] ??
-            "",
-          promoMultiplier,
-        };
-      }
-    }
+    if (insight.estimatedPct == null) return null;
 
-    return null;
+    return {
+      displayPct: insight.estimatedPct,
+      noPromoPct: insight.noPromoPct,
+      color:
+        BOTTLENECK_COLORS[insight.bottleneck as keyof typeof BOTTLENECK_COLORS] ??
+        "var(--accent-orange)",
+      label:
+        BOTTLENECK_LABELS[insight.bottleneck as keyof typeof BOTTLENECK_LABELS] ??
+        "",
+      observedPct: insight.observedPct,
+      deltaPct: insight.deltaPct,
+      observedAt: insight.observedAt,
+      historicalPromoInCycle:
+        hasPromoUsageInBucket &&
+        bucket.timeRemainingMs > 0 &&
+        !promoActiveNow,
+    };
   };
 
   const groups = [...weeklyAll]
@@ -1169,30 +1556,37 @@ function WeeklyWindowsView({
         ? getWeeklyOverrideMatch(overrides, resolvedSonnetBucket, "sonnet")
         : null;
 
-      // Relative to calibration base (Max $200 = 20x): Max $200→1, Max $100→0.25, Pro→0.05
-      const planMult = (weekPlanInfo?.multiplier ?? 20) / 20;
+      const weeklyAllPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "weekly-all");
+      const weeklySonnetPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "weekly-sonnet");
+      const windowPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "5h");
 
       // Find calibration anchors for this week
       const allAnchor = findCalibrationAnchor(calibrations, "weekly-all", allBucket.weekStart);
+      const allSeries = findCalibrationSeries(calibrations, "weekly-all", allBucket.weekStart);
       const sonnetAnchor = resolvedSonnetBucket
         ? findCalibrationAnchor(calibrations, "weekly-sonnet", resolvedSonnetBucket.weekStart)
         : undefined;
+      const sonnetSeries = resolvedSonnetBucket
+        ? findCalibrationSeries(calibrations, "weekly-sonnet", resolvedSonnetBucket.weekStart)
+        : [];
 
       return {
         key: allBucket.weekStart,
         weekKey: weekKeyFromDate(allBucket.weekStart),
+        sonnetWeekKey: resolvedSonnetBucket ? weekKeyFromDate(resolvedSonnetBucket.weekStart) : null,
         allBucket,
         sonnetBucket: resolvedSonnetBucket,
         wins,
-        allEst: computeBucketEstimate(allBucket, "weekly-all", planMult, allAnchor),
+        allEst: computeBucketEstimate(allBucket, "weekly-all", weeklyAllPlanMult, allSeries, allAnchor),
         sonnetEst: computeBucketEstimate(
           resolvedSonnetBucket,
           "weekly-sonnet",
-          planMult,
+          weeklySonnetPlanMult,
+          sonnetSeries,
           sonnetAnchor
         ),
         weekPlanInfo,
-        planMultiplier: planMult,
+        windowPlanMultiplier: windowPlanMult,
         allOverride,
         sonnetOverride,
       };
@@ -1203,16 +1597,19 @@ function WeeklyWindowsView({
     tag: string,
     est: {
       displayPct: number;
-      basePct: number | null;
+      noPromoPct: number | null;
       color: string;
       label: string;
-      promoMultiplier: number;
+      observedPct: number | null;
+      deltaPct: number | null;
+      observedAt: string | null;
+      historicalPromoInCycle: boolean;
     } | null
   ) => (
     <div className="flex items-center gap-2">
       <div className="flex-1 h-6 bg-[var(--bg-primary)] rounded overflow-hidden relative">
         {est &&
-          (est.basePct !== null ? (
+          (est.noPromoPct !== null ? (
             <>
               <div
                 className="absolute inset-y-0 left-0 rounded-l transition-all duration-300"
@@ -1229,7 +1626,7 @@ function WeeklyWindowsView({
                   width: `${Math.max(
                     0,
                     Math.min(
-                      (est.basePct ?? 0) - Math.max(Math.min(est.displayPct, 100), 2),
+                      (est.noPromoPct ?? 0) - Math.max(Math.min(est.displayPct, 100), 2),
                       100 - Math.max(Math.min(est.displayPct, 100), 2)
                     )
                   )}%`,
@@ -1257,17 +1654,21 @@ function WeeklyWindowsView({
           className="w-32 text-right text-[11px] font-semibold tabular-nums shrink-0"
           style={{ color: est.color }}
         >
-          {est.basePct !== null ? (
+          {est.noPromoPct !== null ? (
             <>
               {est.displayPct.toFixed(0)}%
               <span className="text-[var(--accent-orange)] ml-1">
-                ({est.basePct.toFixed(0)}%
-                <span className="text-[9px]">
-                  {" "}
-                  Bonus {formatPromoMultiplier(est.promoMultiplier)}x
-                </span>
-                )
+                ({est.noPromoPct.toFixed(0)}%
+                <span className="text-[9px]"> cycle no promo</span>)
               </span>
+              {est.historicalPromoInCycle && (
+                <span
+                  className="text-[9px] ml-1 text-[var(--text-muted)]"
+                  title="No promo dotyczy całego zakresu tygodniowego; ten cykl zawiera wcześniejsze godziny promocyjne, mimo że promo nie jest już aktywne teraz."
+                >
+                  past promo
+                </span>
+              )}
             </>
           ) : (
             <>
@@ -1293,9 +1694,15 @@ function WeeklyWindowsView({
   return (
     <div className="card p-5">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-[var(--text-secondary)]">
-          Weekly Sessions + 5h Windows
-        </h3>
+        <div>
+          <h3 className="text-sm font-medium text-[var(--text-secondary)]">
+            Weekly Sessions + 5h Windows
+          </h3>
+          <p className="text-[10px] text-[var(--text-muted)] mt-1">
+            `ALL` i `SNNT` mają osobne reset cycles. `Cycle no promo` dotyczy całego zakresu
+            danego wiersza, nie tylko bieżącego dnia.
+          </p>
+        </div>
         <div className="flex gap-1 bg-[var(--bg-secondary)] rounded-md p-0.5">
           {(["output", "total"] as ViewMode[]).map((m) => (
             <button
@@ -1318,13 +1725,14 @@ function WeeklyWindowsView({
           ({
             key,
             weekKey,
+            sonnetWeekKey,
             allBucket,
             sonnetBucket,
             wins,
             allEst,
             sonnetEst,
             weekPlanInfo,
-            planMultiplier: groupPlanMult,
+            windowPlanMultiplier,
             allOverride,
             sonnetOverride,
           }) => {
@@ -1374,6 +1782,18 @@ function WeeklyWindowsView({
                           }}
                         >
                           {weekPlanInfo.shortLabel}
+                        </span>
+                      )}
+                      {sonnetWeekKey && sonnetWeekKey !== weekKey && (
+                        <span
+                          className="text-[9px] px-1 rounded font-medium text-[var(--accent-orange)]"
+                          style={{
+                            background:
+                              "color-mix(in srgb, var(--accent-orange) 14%, transparent)",
+                          }}
+                          title={`ALL jest w cyklu ${weekKey}, a SNNT w cyklu ${sonnetWeekKey}. To są dwa różne tygodniowe zakresy resetu.`}
+                        >
+                          ALL/SNNT reset mismatch
                         </span>
                       )}
                     </div>
@@ -1428,7 +1848,8 @@ function WeeklyWindowsView({
                         viewMode={viewMode}
                         maxTokens={maxTokens}
                         promoPeriods={promoPeriods}
-                        planMultiplier={groupPlanMult}
+                        planMultiplier={windowPlanMultiplier}
+                        calibrationSeries={findCalibrationSeries(calibrations, "5h", win.startTime)}
                         calibrationAnchor={findCalibrationAnchor(calibrations, "5h", win.startTime)}
                       />
                     ))}
@@ -1456,7 +1877,7 @@ function WeeklyWindowsView({
         <span className="border-l border-[var(--border-subtle)] pl-3 flex items-center gap-1">
           <span className="w-3 h-2 rounded-sm bg-[var(--accent-blue)]" style={{ opacity: 0.85 }} />
           <span className="w-3 h-2 rounded-sm bg-[var(--accent-blue)]" style={{ opacity: 0.3 }} />
-          Bonus 2x
+          No promo overlay
         </span>
         <span className="flex items-center gap-1">
           <span className="text-[var(--accent-green)]">●</span>
@@ -1484,6 +1905,94 @@ function WeeklyWindowsView({
   );
 }
 
+// ─── Quick Calibration (live cost override) ─────────────────────────────────
+
+/** Build ad-hoc SolvedLimits from a cost value using default ratio between cost and tokens */
+function solvedLimitsFromCost(costLimit5h: number, costLimitWeekly: number): Record<CalibrationScope, SolvedLimits> {
+  const build = (cost: number, defaults: { outputLimit: number; inputOutputLimit: number; totalLimit: number; costLimit: number }, scope: CalibrationScope): SolvedLimits => {
+    const ratio = defaults.costLimit > 0 ? cost / defaults.costLimit : 1;
+    const best = {
+      outputLimit: Math.round(defaults.outputLimit * ratio),
+      inputOutputLimit: Math.round(defaults.inputOutputLimit * ratio),
+      totalLimit: Math.round(defaults.totalLimit * ratio),
+      costLimit: cost,
+      confidence: 0.5,
+    };
+    return {
+      methods: [{ method: "cost" as const, ...best, dataPoints: 1 }],
+      best,
+      weights: null,
+      scope,
+    };
+  };
+
+  // For Max $200 tier (multiplier 20)
+  const mult = PLAN_TIERS.max20.multiplier;
+  return {
+    "5h": build(costLimit5h * mult, DEFAULT_LIMITS_5H, "5h"),
+    "weekly-all": build(costLimitWeekly * mult, DEFAULT_LIMITS_WEEKLY, "weekly-all"),
+    "weekly-sonnet": build(costLimitWeekly * mult, DEFAULT_LIMITS_WEEKLY, "weekly-sonnet"),
+  };
+}
+
+interface QuickCalProps {
+  cost5h: string;
+  costWeekly: string;
+  onChange: (field: "5h" | "weekly", value: string) => void;
+  onReset: () => void;
+  isActive: boolean;
+}
+
+function QuickCalSidebar({ cost5h, costWeekly, onChange, onReset, isActive }: QuickCalProps) {
+  return (
+    <div className={`sticky top-4 w-[100px] shrink-0 space-y-3 transition-all ${isActive ? "ring-1 ring-[var(--accent-orange)] rounded-xl p-2.5" : "p-2.5"}`}
+      style={isActive ? { background: "color-mix(in srgb, var(--accent-orange) 5%, var(--bg-card))" } : undefined}
+    >
+      <div className="text-[9px] font-semibold text-[var(--text-muted)] uppercase tracking-wider">
+        Quick Cal
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-[10px] text-[var(--text-muted)] block" htmlFor="qcal-5h">5h $</label>
+        <input
+          id="qcal-5h"
+          type="number"
+          step="0.5"
+          placeholder={DEFAULT_LIMITS_5H.costLimit.toFixed(0)}
+          value={cost5h}
+          onChange={(e) => onChange("5h", e.target.value)}
+          className="w-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded px-1.5 py-1.5 text-[11px] tabular-nums text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-orange)] transition-colors text-right"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-[10px] text-[var(--text-muted)] block" htmlFor="qcal-wk">Week $</label>
+        <input
+          id="qcal-wk"
+          type="number"
+          step="1"
+          placeholder={DEFAULT_LIMITS_WEEKLY.costLimit.toFixed(0)}
+          value={costWeekly}
+          onChange={(e) => onChange("weekly", e.target.value)}
+          className="w-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded px-1.5 py-1.5 text-[11px] tabular-nums text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-orange)] transition-colors text-right"
+        />
+      </div>
+
+      {isActive && (
+        <div className="space-y-1.5 pt-1 border-t border-[var(--border-subtle)]">
+          <span className="text-[10px] text-[var(--accent-orange)] font-semibold block text-center">LIVE</span>
+          <button
+            onClick={onReset}
+            className="w-full text-[10px] text-[var(--text-muted)] hover:text-[var(--accent-red)] transition-colors text-center"
+          >
+            reset
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main LimitsTab Component ─────────────────────────────────────────────────
 
 interface LimitsTabProps {
@@ -1495,8 +2004,52 @@ interface LimitsTabProps {
   promoPeriods?: PromoPeriod[];
 }
 
-export function LimitsTab({ limitsData, solvedLimits, derivedLimits, calibrations, planPeriods, promoPeriods = [] }: LimitsTabProps) {
+export function LimitsTab({
+  limitsData,
+  solvedLimits,
+  derivedLimits,
+  calibrations,
+  planPeriods = EMPTY_PLAN_PERIODS,
+  promoPeriods = EMPTY_PROMO_PERIODS,
+}: LimitsTabProps) {
   const [overrides, setOverrides] = useState<SessionOverrides>({ weekly: {}, "5h": {} });
+
+  // Quick Calibration state
+  const [qcal5h, setQcal5h] = useState("");
+  const [qcalWeekly, setQcalWeekly] = useState("");
+
+  const qcal5hVal = parseFloat(qcal5h);
+  const qcalWeeklyVal = parseFloat(qcalWeekly);
+  const has5h = !isNaN(qcal5hVal) && qcal5hVal > 0;
+  const hasWeekly = !isNaN(qcalWeeklyVal) && qcalWeeklyVal > 0;
+  const qcalActive = has5h || hasWeekly;
+
+  // Build effective limits: merge quick cal with original, only override filled scopes
+  const effectiveSolvedLimits = (() => {
+    if (!qcalActive) return solvedLimits;
+
+    const adhoc = solvedLimitsFromCost(
+      has5h ? qcal5hVal : DEFAULT_LIMITS_5H.costLimit,
+      hasWeekly ? qcalWeeklyVal : DEFAULT_LIMITS_WEEKLY.costLimit
+    );
+
+    // Keep original solved limits for scopes the user didn't touch
+    return {
+      "5h": has5h ? adhoc["5h"] : (solvedLimits?.["5h"] ?? adhoc["5h"]),
+      "weekly-all": hasWeekly ? adhoc["weekly-all"] : (solvedLimits?.["weekly-all"] ?? adhoc["weekly-all"]),
+      "weekly-sonnet": hasWeekly ? adhoc["weekly-sonnet"] : (solvedLimits?.["weekly-sonnet"] ?? adhoc["weekly-sonnet"]),
+    };
+  })();
+
+  const handleQcalChange = (field: "5h" | "weekly", value: string) => {
+    if (field === "5h") setQcal5h(value);
+    else setQcalWeekly(value);
+  };
+
+  const handleQcalReset = () => {
+    setQcal5h("");
+    setQcalWeekly("");
+  };
 
   const fetchOverrides = useCallback(async () => {
     try {
@@ -1529,28 +2082,49 @@ export function LimitsTab({ limitsData, solvedLimits, derivedLimits, calibration
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <div className="card p-4 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[var(--text-muted)]">
+        <span><span className="font-semibold text-[var(--text-secondary)]">Est.</span> = model z JSONL + plan + promo</span>
+        <span><span className="font-semibold text-[var(--text-secondary)]">Obs.</span> = snapshot z panelu Anthropic</span>
+        <span><span className="font-semibold text-[var(--text-secondary)]">Δ</span> = Obs. - Est.</span>
+        <span><span className="font-semibold text-[var(--text-secondary)]">No promo</span> = ten sam usage policzony bez bonusu promo</span>
+      </div>
+
       {/* Section A: Status cards */}
       <StatusCards
         currentWindow={limitsData.currentWindow}
         currentWeekAll={limitsData.currentWeekAll}
-        solvedLimits={solvedLimits}
-        derivedLimits={derivedLimits}
-        promoPeriods={promoPeriods}
-      />
-
-      {/* Section B+C: Weekly groups with 5h windows inside, progress bars, expanded by default */}
-      <WeeklyWindowsView
-        windows={limitsData.windows}
-        weeklyAll={limitsData.weeklyAll}
-        weeklySonnet={limitsData.weeklySonnet}
-        solvedLimits={solvedLimits}
+        currentWeekSonnet={limitsData.currentWeekSonnet}
+        solvedLimits={effectiveSolvedLimits}
         derivedLimits={derivedLimits}
         calibrations={calibrations}
-        overrides={overrides}
-        onSaveOverride={handleSaveOverride}
         planPeriods={planPeriods}
         promoPeriods={promoPeriods}
       />
+
+      {/* Section B+C: Bars + Quick Cal floating sidebar */}
+      <div className="flex gap-4 items-start">
+        <div className="flex-1 min-w-0">
+          <WeeklyWindowsView
+            windows={limitsData.windows}
+            weeklyAll={limitsData.weeklyAll}
+            weeklySonnet={limitsData.weeklySonnet}
+            solvedLimits={effectiveSolvedLimits}
+            derivedLimits={derivedLimits}
+            calibrations={calibrations}
+            overrides={overrides}
+            onSaveOverride={handleSaveOverride}
+            planPeriods={planPeriods}
+            promoPeriods={promoPeriods}
+          />
+        </div>
+        <QuickCalSidebar
+          cost5h={qcal5h}
+          costWeekly={qcalWeekly}
+          onChange={handleQcalChange}
+          onReset={handleQcalReset}
+          isActive={qcalActive}
+        />
+      </div>
     </div>
   );
 }

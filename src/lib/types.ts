@@ -116,7 +116,16 @@ export interface PeakSplitTokens {
   messageCount: number;
 }
 
-export interface FiveHourWindow {
+export interface NormalizedUsageTotals {
+  normalizedInputTokens: number;
+  normalizedOutputTokens: number;
+  normalizedCacheCreationTokens: number;
+  normalizedCacheReadTokens: number;
+  normalizedTotalTokens: number;
+  normalizedCost: number;
+}
+
+export interface FiveHourWindow extends NormalizedUsageTotals {
   id: number;
   startTime: string;           // ISO 8601 UTC
   endTime: string;             // window_start + 5h (theoretical end)
@@ -145,7 +154,7 @@ export interface WeeklyResetConfig {
   sonnetOnly: { day: number; hour: number; minute: number };
 }
 
-export interface WeeklyBucket {
+export interface WeeklyBucket extends NormalizedUsageTotals {
   weekStart: string;           // ISO 8601 UTC
   weekEnd: string;
   modelFilter: "all" | "sonnet";

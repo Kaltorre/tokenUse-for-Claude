@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   UsageData,
   DerivedLimits,
@@ -11,6 +11,13 @@ import {
 } from "@/lib/types";
 import { loadDerivedLimits } from "@/lib/utilization";
 import { solveLimits, detectAnomalies } from "@/lib/calibration";
+import {
+  buildCalibratedBaseDerivedLimits,
+  buildManualBaseDerivedLimits,
+  loadLimitSourceMode,
+  saveLimitSourceMode,
+  LimitSourceMode,
+} from "@/lib/limit-source";
 import { StatsCards } from "@/components/StatsCards";
 import { DailyChart } from "@/components/DailyChart";
 import { SessionList } from "@/components/SessionList";
@@ -79,6 +86,8 @@ interface LoadingProgress {
   total?: number;
 }
 
+const LIVE_REFRESH_MS = 15_000;
+
 export default function Home() {
   const [data, setData] = useState<UsageData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -93,13 +102,23 @@ export default function Home() {
   const [planPeriods, setPlanPeriods] = useState<PlanPeriod[]>([]);
   const [promoPeriods, setPromoPeriods] = useState<PromoPeriod[]>([]);
   const [limitOverrides, setLimitOverrides] = useState<LimitOverridesMap>({});
+  const [limitSourceMode, setLimitSourceMode] = useState<LimitSourceMode>("calibrated");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const planPeriodsRef = useRef<PlanPeriod[]>([]);
   const { theme, toggleTheme } = useTheme();
 
+  const applyUsageData = useCallback((payload: UsageData) => {
+    startTransition(() => {
+      setData(payload);
+      setError(null);
+      setLoading(false);
+    });
+  }, []);
+
   // Load derived limits from localStorage
   useEffect(() => {
     setDerivedLimits(loadDerivedLimits());
+    setLimitSourceMode(loadLimitSourceMode());
   }, []);
 
   useEffect(() => {
@@ -158,13 +177,6 @@ export default function Home() {
     }
   }, []);
 
-  // Promos can change how snapshots are interpreted; keep anomaly labels aligned
-  // with the latest plan-aware baseline after promo config updates.
-  const handlePromoChange = useCallback(async () => {
-    await fetchPromos();
-    setCalibrations((prev) => detectAnomalies(prev, planPeriodsRef.current));
-  }, [fetchPromos]);
-
   useEffect(() => {
     fetchCalibrations();
     fetchPlans();
@@ -182,9 +194,43 @@ export default function Home() {
     () => buildSolvedLimits(calibrations),
     [calibrations]
   );
+  const hasAnySolvedLimits = useMemo(
+    () =>
+      Object.values(solvedLimits).some(
+        (solved) => solved.methods.length > 0 && solved.best.confidence > 0
+      ),
+    [solvedLimits]
+  );
+
+  const manualBaseLimits = useMemo(
+    () => buildManualBaseDerivedLimits(derivedLimits, limitOverrides),
+    [derivedLimits, limitOverrides]
+  );
+
+  const calibratedBaseLimits = useMemo(
+    () => buildCalibratedBaseDerivedLimits(solvedLimits, manualBaseLimits),
+    [manualBaseLimits, solvedLimits]
+  );
+
+  const activeSolvedLimits = limitSourceMode === "calibrated" ? solvedLimits : null;
+  const activeDerivedLimits =
+    limitSourceMode === "calibrated" ? calibratedBaseLimits : manualBaseLimits;
+
+  const handleLimitSourceModeChange = useCallback((mode: LimitSourceMode) => {
+    setLimitSourceMode(mode);
+    saveLimitSourceMode(mode);
+  }, []);
+
+  useEffect(() => {
+    if (!hasAnySolvedLimits && limitSourceMode !== "manual") {
+      setLimitSourceMode("manual");
+      saveLimitSourceMode("manual");
+    }
+  }, [hasAnySolvedLimits, limitSourceMode]);
 
   useEffect(() => {
     let cancelled = false;
+
     async function loadData() {
       try {
         const res = await fetch("/api/usage/stream", { cache: "no-store" });
@@ -214,8 +260,7 @@ export default function Home() {
             if (event === "progress" && !cancelled) {
               setProgress(payload as LoadingProgress);
             } else if (event === "done" && !cancelled) {
-              setData(payload);
-              setLoading(false);
+              applyUsageData(payload as UsageData);
             } else if (event === "error" && !cancelled) {
               setError(payload.message);
               setLoading(false);
@@ -231,7 +276,59 @@ export default function Home() {
     }
     loadData();
     return () => { cancelled = true; };
-  }, []);
+  }, [applyUsageData]);
+
+  const refreshUsageData = useCallback(async () => {
+    const res = await fetch("/api/usage", { cache: "no-store" });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const body = await res.json();
+        if (body?.error) detail = body.error;
+      } catch {}
+      throw new Error(`Failed to refresh usage: ${detail}`);
+    }
+
+    const payload = await res.json() as UsageData;
+    applyUsageData(payload);
+  }, [applyUsageData]);
+
+  const handlePromoChange = useCallback(async () => {
+    await Promise.all([
+      fetchPromos(),
+      fetchCalibrations(),
+      refreshUsageData(),
+    ]);
+  }, [fetchCalibrations, fetchPromos, refreshUsageData]);
+
+  useEffect(() => {
+    if (loading || !data) return;
+
+    let cancelled = false;
+
+    const refresh = () => {
+      if (cancelled || document.visibilityState === "hidden") return;
+
+      void refreshUsageData().catch((err) => {
+        if (!cancelled) {
+          console.error("Background usage refresh failed:", err);
+        }
+      });
+    };
+
+    const interval = window.setInterval(refresh, LIVE_REFRESH_MS);
+    const refreshOnFocus = () => refresh();
+
+    document.addEventListener("visibilitychange", refreshOnFocus);
+    window.addEventListener("focus", refreshOnFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
+      window.removeEventListener("focus", refreshOnFocus);
+    };
+  }, [data, loading, refreshUsageData]);
 
   if (loading) {
     const pct = progress.current != null && progress.total != null && progress.total > 0
@@ -430,7 +527,7 @@ export default function Home() {
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
               <ProjectBreakdown projects={data.projects} />
-              <SessionList sessions={data.sessions.slice(0, 15)} compact derivedLimits={derivedLimits} />
+              <SessionList sessions={data.sessions.slice(0, 15)} compact derivedLimits={activeDerivedLimits} />
             </div>
           </div>
         )}
@@ -438,7 +535,7 @@ export default function Home() {
         {/* Sessions Tab */}
         {tab === "sessions" && (
           <div className="animate-fade-in">
-            <SessionList sessions={data.sessions} derivedLimits={derivedLimits} />
+            <SessionList sessions={data.sessions} derivedLimits={activeDerivedLimits} />
           </div>
         )}
 
@@ -453,8 +550,8 @@ export default function Home() {
         {tab === "limits" && (
           <LimitsTab
             limitsData={data.limits}
-            solvedLimits={solvedLimits}
-            derivedLimits={derivedLimits}
+            solvedLimits={activeSolvedLimits}
+            derivedLimits={activeDerivedLimits}
             calibrations={calibrations}
             planPeriods={planPeriods}
             promoPeriods={promoPeriods}
@@ -467,8 +564,8 @@ export default function Home() {
             weeklyAll={data.limits.weeklyAll}
             weeklySonnet={data.limits.weeklySonnet}
             windows={data.limits.windows}
-            derivedLimits={derivedLimits}
-            solvedLimits={solvedLimits}
+            derivedLimits={activeDerivedLimits}
+            solvedLimits={activeSolvedLimits ?? undefined}
             planPeriods={planPeriods}
             promoPeriods={promoPeriods}
           />
@@ -477,7 +574,11 @@ export default function Home() {
         {/* Delta Analysis Tab */}
         {tab === "deltaAnalysis" && (
           <div className="animate-fade-in">
-            <CalibrationDeltaTable calibrations={calibrations} loading={calibrationsLoading} />
+            <CalibrationDeltaTable
+              calibrations={calibrations}
+              loading={calibrationsLoading}
+              planPeriods={planPeriods}
+            />
           </div>
         )}
 
@@ -494,6 +595,8 @@ export default function Home() {
               planPeriods={planPeriods}
               limitOverrides={limitOverrides}
               onLimitOverridesChange={fetchLimitOverrides}
+              limitSourceMode={limitSourceMode}
+              onLimitSourceModeChange={handleLimitSourceModeChange}
             />
           </div>
         )}

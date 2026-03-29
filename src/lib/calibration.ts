@@ -10,7 +10,7 @@ import {
   PlanPeriod,
   PlanTier,
 } from "./types";
-import { getActivePromoMultiplier, isInPromoRange, normalizeUsageToBase } from "./utilization";
+import { getActivePromoMultiplier, isInPromoRange, normalizeUsageToBase, PromoNormalizationMode } from "./utilization";
 import { getPlanTierForDate } from "./plans";
 
 const STORAGE_KEY = "claude-usage-calibrations";
@@ -739,8 +739,11 @@ export function estimateUtilization(
   promos: PromoPeriod[] = [],
   /** Plan tier multiplier relative to the calibration baseline (e.g. 0.25 for Max5 when calibrations are from Max20) */
   planMultiplier: number = 1,
+  /** If provided, use the full same-cycle calibration series for delta-based interpolation. */
+  calibrationSeries?: CalibrationPoint[],
   /** If provided, use this calibration anchor for direct interpolation instead of regression */
-  calibrationAnchor?: CalibrationPoint
+  calibrationAnchor?: CalibrationPoint,
+  options?: { promoMode?: PromoNormalizationMode }
 ): {
   estimatedPct: number;
   outputPct: number;
@@ -752,11 +755,151 @@ export function estimateUtilization(
 } | null {
   if (solved.best.confidence === 0) return null;
 
-  const normalized = normalizeUsageToBase({ ...tokens, cost }, peakStatus, windowStart, peakSplit, promos);
+  const promoMode = options?.promoMode ?? "apply";
+  const normalized = normalizeUsageToBase(
+    { ...tokens, cost },
+    peakStatus,
+    windowStart,
+    peakSplit,
+    promos,
+    { promoMode }
+  );
+
+  const b = solved.best;
+  const pm = planMultiplier > 0 ? planMultiplier : 1;
+  const fallbackOutputLimit = b.outputLimit * pm;
+  const fallbackIoLimit = b.inputOutputLimit * pm;
+  const fallbackTotalLimit = b.totalLimit * pm;
+  const fallbackCostLimit = b.costLimit * pm;
+
+  const pctFromLimit = (value: number, limit: number): number =>
+    limit > 0 ? (value / limit) * 100 : 0;
+
+  const buildSeriesRepresentatives = (
+    points: CalibrationPoint[] | undefined
+  ): Array<{
+    reportedPct: number;
+    timestamp: string;
+    normalizedTokens: NonNullable<CalibrationPoint["normalizedTokens"]>;
+  }> => {
+    if (!points || points.length === 0) return [];
+
+    const byPct = new Map<number, CalibrationPoint[]>();
+    for (const point of points) {
+      if (point.reportedPct <= 0 || point.normalizedTokens == null) continue;
+      const group = byPct.get(point.reportedPct) ?? [];
+      group.push(point);
+      byPct.set(point.reportedPct, group);
+    }
+
+    return [...byPct.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([reportedPct, group]) => {
+        const sortedGroup = [...group].sort(
+          (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
+        const first = sortedGroup[0].normalizedTokens!;
+        const last = sortedGroup[sortedGroup.length - 1].normalizedTokens!;
+
+        return {
+          reportedPct,
+          timestamp: sortedGroup[sortedGroup.length - 1].timestamp,
+          normalizedTokens: {
+            output: (first.output + last.output) / 2,
+            input: (first.input + last.input) / 2,
+            cacheWrite: (first.cacheWrite + last.cacheWrite) / 2,
+            cacheRead: (first.cacheRead + last.cacheRead) / 2,
+            total: (first.total + last.total) / 2,
+            cost: (first.cost + last.cost) / 2,
+          },
+        };
+      });
+  };
+
+  const estimatePctFromSeries = (
+    currentValue: number,
+    startValue: number,
+    endValue: number,
+    startPct: number,
+    endPct: number
+  ): number | null => {
+    const pctSpan = endPct - startPct;
+    const valueSpan = endValue - startValue;
+    if (pctSpan <= 0 || valueSpan <= 0) return null;
+    const perPct = valueSpan / pctSpan;
+    if (!Number.isFinite(perPct) || perPct <= 0) return null;
+    return startPct + (currentValue - startValue) / perPct;
+  };
+
+  const seriesPoints = buildSeriesRepresentatives(calibrationSeries);
+  if (seriesPoints.length >= 2) {
+    const first = seriesPoints[0];
+    const last = seriesPoints[seriesPoints.length - 1];
+
+    const currentIO = normalized.input + normalized.output;
+    const firstIO = first.normalizedTokens.input + first.normalizedTokens.output;
+    const lastIO = last.normalizedTokens.input + last.normalizedTokens.output;
+
+    const outputPct =
+      estimatePctFromSeries(
+        normalized.output,
+        first.normalizedTokens.output,
+        last.normalizedTokens.output,
+        first.reportedPct,
+        last.reportedPct
+      ) ?? pctFromLimit(normalized.output, fallbackOutputLimit);
+    const ioPct =
+      estimatePctFromSeries(
+        currentIO,
+        firstIO,
+        lastIO,
+        first.reportedPct,
+        last.reportedPct
+      ) ?? pctFromLimit(currentIO, fallbackIoLimit);
+    const totalPct =
+      estimatePctFromSeries(
+        normalized.total,
+        first.normalizedTokens.total,
+        last.normalizedTokens.total,
+        first.reportedPct,
+        last.reportedPct
+      ) ?? pctFromLimit(normalized.total, fallbackTotalLimit);
+    const costPct =
+      estimatePctFromSeries(
+        normalized.cost,
+        first.normalizedTokens.cost,
+        last.normalizedTokens.cost,
+        first.reportedPct,
+        last.reportedPct
+      ) ?? pctFromLimit(normalized.cost, fallbackCostLimit);
+
+    let bottleneck: "output" | "inout" | "total" | "cost" = "cost";
+    let estimatedPct = costPct;
+
+    if (outputPct > estimatedPct) { estimatedPct = outputPct; bottleneck = "output"; }
+    if (ioPct > estimatedPct) { estimatedPct = ioPct; bottleneck = "inout"; }
+    if (totalPct > estimatedPct) { estimatedPct = totalPct; bottleneck = "total"; }
+
+    const pctSpan = Math.max(0, last.reportedPct - first.reportedPct);
+
+    return {
+      estimatedPct: Math.round(Math.max(estimatedPct, 0) * 10) / 10,
+      outputPct: Math.round(Math.max(outputPct, 0) * 10) / 10,
+      ioPct: Math.round(Math.max(ioPct, 0) * 10) / 10,
+      totalPct: Math.round(Math.max(totalPct, 0) * 10) / 10,
+      costPct: Math.round(Math.max(costPct, 0) * 10) / 10,
+      bottleneck,
+      confidence: Math.min(solved.best.confidence + Math.min(pctSpan / 100, 0.15), 1),
+    };
+  }
 
   // --- Calibration anchor: direct interpolation from known point ---
   // Much more accurate than regression for the same window period
-  if (calibrationAnchor && calibrationAnchor.reportedPct > 0 && calibrationAnchor.normalizedTokens) {
+  if (
+    calibrationAnchor &&
+    calibrationAnchor.reportedPct > 0 &&
+    calibrationAnchor.normalizedTokens
+  ) {
     const anchor = calibrationAnchor.normalizedTokens;
     if (anchor.cost > 0) {
       // Interpolate: current% = anchor% * (currentTokens / anchorTokens)
@@ -798,13 +941,10 @@ export function estimateUtilization(
   }
 
   // --- Fallback: regression-based estimation ---
-  const b = solved.best;
-
-  const pm = planMultiplier > 0 ? planMultiplier : 1;
-  const outLimit = b.outputLimit * pm;
-  const ioLimit = b.inputOutputLimit * pm;
-  const totLimit = b.totalLimit * pm;
-  const costLim = b.costLimit * pm;
+  const outLimit = fallbackOutputLimit;
+  const ioLimit = fallbackIoLimit;
+  const totLimit = fallbackTotalLimit;
+  const costLim = fallbackCostLimit;
 
   if (outLimit <= 0 || ioLimit <= 0 || totLimit <= 0) return null;
 
@@ -850,18 +990,45 @@ export function findCalibrationAnchor(
   scope: CalibrationScope,
   windowStart: string
 ): CalibrationPoint | undefined {
-  const matchKey = scope === "5h" ? windowStart : windowStart.substring(0, 10);
-  return calibrations
+  return findCalibrationSeries(calibrations, scope, windowStart)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+}
+
+/**
+ * Return all calibration points for the same logical cycle/window.
+ * Weekly keeps the legacy day-level fallback for older snapshots.
+ */
+export function findCalibrationSeries(
+  calibrations: CalibrationPoint[],
+  scope: CalibrationScope,
+  windowStart: string
+): CalibrationPoint[] {
+  const exact = calibrations
     .filter(
       (c) =>
         c.scope === scope &&
-        c.reportedPct > 0 &&
+        c.reportedPct >= 0 &&
         c.normalizedTokens != null &&
-        (scope === "5h"
-          ? c.windowStart === windowStart
-          : (c.windowStart ?? "").substring(0, 10) === matchKey)
+        c.windowStart === windowStart
     )
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  if (exact.length > 0) return exact;
+
+  if (scope !== "5h") {
+    const matchKey = windowStart.substring(0, 10);
+    return calibrations
+      .filter(
+        (c) =>
+          c.scope === scope &&
+          c.reportedPct >= 0 &&
+          c.normalizedTokens != null &&
+          (c.windowStart ?? "").substring(0, 10) === matchKey
+      )
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  }
+
+  return [];
 }
 
 /**

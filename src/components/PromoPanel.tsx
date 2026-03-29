@@ -3,68 +3,13 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { PromoPeriod, PromoSchedule } from "@/lib/types";
+import {
+  formatPolishDate,
+  fromPolishDateInput,
+  toPolishDateInput,
+} from "@/lib/promo-time";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function nthWeekdayOfMonthUTC(year: number, month: number, weekday: number, nth: number): number {
-  const firstDay = new Date(Date.UTC(year, month, 1)).getUTCDay();
-  const offset = (weekday - firstDay + 7) % 7;
-  return 1 + offset + (nth - 1) * 7;
-}
-
-function isEasternDstLocal(year: number, month: number, day: number, hour: number): boolean {
-  const dstStartDay = nthWeekdayOfMonthUTC(year, 2, 0, 2);
-  const dstEndDay = nthWeekdayOfMonthUTC(year, 10, 0, 1);
-
-  if (month < 3 || month > 11) return false;
-  if (month > 3 && month < 11) return true;
-
-  if (month === 3) {
-    if (day < dstStartDay) return false;
-    if (day > dstStartDay) return true;
-    return hour >= 2;
-  }
-
-  if (day < dstEndDay) return true;
-  if (day > dstEndDay) return false;
-  return hour < 2;
-}
-
-function toEasternDateInput(iso: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date(iso));
-
-  const year = parts.find((p) => p.type === "year")?.value ?? "0000";
-  const month = parts.find((p) => p.type === "month")?.value ?? "01";
-  const day = parts.find((p) => p.type === "day")?.value ?? "01";
-
-  return `${year}-${month}-${day}`;
-}
-
-function fromEasternDateInput(val: string, boundary: "start" | "end"): string {
-  const [year, month, day] = val.split("-").map(Number);
-  const hour = boundary === "start" ? 0 : 23;
-  const minute = boundary === "start" ? 0 : 59;
-  const second = boundary === "start" ? 0 : 59;
-  const offsetHours = isEasternDstLocal(year, month, day, hour) ? 4 : 5;
-
-  return new Date(
-    Date.UTC(year, month - 1, day, hour + offsetHours, minute, second)
-  ).toISOString();
-}
-
-function formatEasternDate(iso: string): string {
-  return new Intl.DateTimeFormat("pl-PL", {
-    timeZone: "America/New_York",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(new Date(iso));
-}
 
 function scheduleLabel(schedule: PromoSchedule): string {
   if (schedule.type === "all-day-all-week") return "All day, all week";
@@ -99,8 +44,8 @@ interface PromoDialogProps {
 function PromoDialog({ initial, onSave, onClose }: PromoDialogProps) {
   const [mounted, setMounted] = useState(false);
   const [name, setName] = useState(initial?.name ?? "");
-  const [dateFrom, setDateFrom] = useState(initial ? toEasternDateInput(initial.dateFrom) : "");
-  const [dateTo, setDateTo] = useState(initial ? toEasternDateInput(initial.dateTo) : "");
+  const [dateFrom, setDateFrom] = useState(initial ? toPolishDateInput(initial.dateFrom) : "");
+  const [dateTo, setDateTo] = useState(initial ? toPolishDateInput(initial.dateTo) : "");
   const [scheduleType, setScheduleType] = useState<ScheduleType>(
     initial?.schedule.type ?? "all-day-all-week"
   );
@@ -186,8 +131,8 @@ function PromoDialog({ initial, onSave, onClose }: PromoDialogProps) {
       await onSave({
         id: initial?.id,
         name: name.trim(),
-        dateFrom: fromEasternDateInput(dateFrom, "start"),
-        dateTo: fromEasternDateInput(dateTo, "end"),
+        dateFrom: fromPolishDateInput(dateFrom, "start"),
+        dateTo: fromPolishDateInput(dateTo, "end"),
         schedule: buildSchedule(),
         multiplier,
       });
@@ -254,7 +199,7 @@ function PromoDialog({ initial, onSave, onClose }: PromoDialogProps) {
             </div>
           </div>
           <p className="text-[10px] text-[var(--text-muted)] -mt-2">
-            Dates are interpreted in Eastern Time (ET).
+            Dates are interpreted in Polish time.
           </p>
 
           {/* Schedule type */}
@@ -282,7 +227,7 @@ function PromoDialog({ initial, onSave, onClose }: PromoDialogProps) {
             {/* Daily hours fields */}
             {scheduleType === "daily-hours" && (
               <div className="mt-3">
-              <p className="text-[10px] text-[var(--text-muted)] mb-2">Times in Eastern Time (ET)</p>
+              <p className="text-[10px] text-[var(--text-muted)] mb-2">Times in Polish time</p>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs text-[var(--text-muted)] mb-1">Hour from (0-23)</label>
@@ -361,7 +306,7 @@ function PromoDialog({ initial, onSave, onClose }: PromoDialogProps) {
                         </label>
                       ))}
                     </div>
-                    <p className="text-[10px] text-[var(--text-muted)]">Times in Eastern Time (ET) — PL (CEST) = ET + 6h</p>
+                    <p className="text-[10px] text-[var(--text-muted)]">Times in Polish time</p>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
                         <label className="block text-xs text-[var(--text-muted)] mb-1">Hour from (0-23)</label>
@@ -539,7 +484,7 @@ export function PromoPanel({ periods, onPeriodsChange }: PromoPanelProps) {
 
                   {/* Date range */}
                   <div className="text-xs text-[var(--text-muted)] tabular-nums">
-                    {formatEasternDate(p.dateFrom)} – {formatEasternDate(p.dateTo)}
+                    {formatPolishDate(p.dateFrom)} – {formatPolishDate(p.dateTo)}
                   </div>
 
                   {/* Schedule */}

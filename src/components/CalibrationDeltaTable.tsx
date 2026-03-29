@@ -1,13 +1,15 @@
 "use client";
 
 import { Fragment, useMemo, useState } from "react";
-import { CalibrationPoint, CalibrationScope, ModelTokenBreakdown } from "@/lib/types";
+import { CalibrationPoint, CalibrationScope, PLAN_TIERS, PlanPeriod } from "@/lib/types";
 import { formatTokens, formatCost, formatDateTime } from "@/lib/format";
 import { getModelPricing } from "@/lib/pricing";
+import { getPlanTierForDate } from "@/lib/plans";
 
 interface Props {
   calibrations: CalibrationPoint[];
   loading?: boolean;
+  planPeriods?: PlanPeriod[];
 }
 
 type ScopeFilter = "weekly-all" | "weekly-sonnet" | "5h";
@@ -33,7 +35,8 @@ interface DeltaRow {
   fromTime: string;
   toTime: string;
   deltaCost: number;
-  costPerPct: number;
+  rawCostPerPct: number;
+  normalizedCostPerPct: number;
   deltaOutput: number;
   outputPerPct: number;
   deltaInput: number;
@@ -63,6 +66,7 @@ interface WeekGroupTotals {
   totalDeltaCacheWCost: number;
   totalDeltaCacheRCost: number;
   totalMinutes: number;
+  avgRawCostPerPct: number;
   avgCostPerPct: number;
   avgOutputPerPct: number;
   avgInputPerPct: number;
@@ -78,8 +82,13 @@ interface WeekGroup {
   weekLabel: string;
   weekStart: string;
   pointCount: number;
+  planLabel: string | null;
+  planShortLabel: string | null;
+  planColor: string;
+  hasPromoAdjustedPoints: boolean;
   rows: DeltaRow[];
   totalDeltaPct: number;
+  avgRawCostPerPct: number;
   avgCostPerPct: number;
   avgOutputPerPct: number;
   avgTotalPerPct: number;
@@ -110,7 +119,9 @@ const SCOPE_TABS: { key: ScopeFilter; label: string }[] = [
   { key: "5h", label: "5h Windows" },
 ];
 
-export function CalibrationDeltaTable({ calibrations, loading }: Props) {
+const EMPTY_PLAN_PERIODS: PlanPeriod[] = [];
+
+export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMPTY_PLAN_PERIODS }: Props) {
   const [scope, setScope] = useState<ScopeFilter>("weekly-all");
   const [minDelta, setMinDelta] = useState(0);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
@@ -127,7 +138,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
       .filter(
         (p) =>
           p.scope === scope &&
-          p.reportedPct > 0 &&
+          p.reportedPct >= 0 &&
           p.normalizedTokens != null
       )
       .sort(
@@ -162,6 +173,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
 
         const n1 = prev.normalizedTokens!;
         const n2 = curr.normalizedTokens!;
+        const rawDeltaCost = curr.cost - prev.cost;
         const deltaCost = n2.cost - n1.cost;
         const deltaOutput = n2.output - n1.output;
         const deltaInput = n2.input - n1.input;
@@ -226,7 +238,8 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
           fromTime: prev.timestamp,
           toTime: curr.timestamp,
           deltaCost,
-          costPerPct: deltaCost / deltaPct,
+          rawCostPerPct: rawDeltaCost / deltaPct,
+          normalizedCostPerPct: deltaCost / deltaPct,
           deltaOutput,
           outputPerPct: deltaOutput / deltaPct,
           deltaInput,
@@ -246,10 +259,16 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
 
       if (rows.length === 0) continue;
 
-      const validRows = rows.filter((r) => r.deltaCost > 0);
+      const validRows = rows.filter(
+        (r) => r.deltaCost > 0 || r.rawCostPerPct > 0 || r.normalizedCostPerPct > 0
+      );
       const totalDelta = rows.reduce((s, r) => s + r.deltaPct, 0);
+      const weightedRawCost = validRows.reduce(
+        (s, r) => s + r.rawCostPerPct * r.deltaPct,
+        0
+      );
       const weightedCost = validRows.reduce(
-        (s, r) => s + r.costPerPct * r.deltaPct,
+        (s, r) => s + r.normalizedCostPerPct * r.deltaPct,
         0
       );
       const weightedOut = validRows.reduce(
@@ -274,6 +293,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
       const sumCacheWCost = validRows.reduce((s, r) => s + r.deltaCacheWCost, 0);
       const sumCacheRCost = validRows.reduce((s, r) => s + r.deltaCacheRCost, 0);
       const sumMinutes = rows.reduce((s, r) => s + r.minutesBetween, 0);
+      const avgRawCPP = validDelta > 0 ? weightedRawCost / validDelta : 0;
       const avgCPP = validDelta > 0 ? weightedCost / validDelta : 0;
       const avgOPP = validDelta > 0 ? weightedOut / validDelta : 0;
 
@@ -290,6 +310,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
         totalDeltaCacheWCost: sumCacheWCost,
         totalDeltaCacheRCost: sumCacheRCost,
         totalMinutes: sumMinutes,
+        avgRawCostPerPct: avgRawCPP,
         avgCostPerPct: avgCPP,
         avgOutputPerPct: avgOPP,
         avgInputPerPct: validDelta > 0 ? sumInput / validDelta : 0,
@@ -301,12 +322,26 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
         estTotal100: validDelta > 0 ? (weightedTot / validDelta) * 100 : 0,
       };
 
+      const planTier =
+        planPeriods.length > 0
+          ? getPlanTierForDate(pts[0].windowStart ?? pts[0].timestamp, planPeriods)
+          : null;
+      const planInfo = planTier ? PLAN_TIERS[planTier] : null;
+      const hasPromoAdjustedPoints = pts.some(
+        (p) => p.normalizedTokens != null && p.cost - p.normalizedTokens.cost > 1e-6
+      );
+
       result.push({
         weekLabel: getGroupLabel(weekStart, scope),
         weekStart,
         pointCount: pts.length,
+        planLabel: planInfo?.label ?? null,
+        planShortLabel: planInfo?.shortLabel ?? null,
+        planColor: planInfo?.color ?? "var(--text-muted)",
+        hasPromoAdjustedPoints,
         rows,
         totalDeltaPct: totalDelta,
+        avgRawCostPerPct: avgRawCPP,
         avgCostPerPct: avgCPP,
         avgOutputPerPct: avgOPP,
         avgTotalPerPct: totals.avgTotalPerPct,
@@ -315,7 +350,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
     }
 
     return result.sort((a, b) => b.weekStart.localeCompare(a.weekStart));
-  }, [calibrations, scope, minDelta]);
+  }, [calibrations, minDelta, planPeriods, scope]);
 
   return (
     <div className="space-y-4">
@@ -325,7 +360,9 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
             Calibration Δ Analysis
           </h3>
           <p className="text-[10px] text-[var(--text-muted)]">
-            Porównanie między kolejnymi kalibracjami — ile tokenów/kosztu na 1% różnicy.
+            `Δ%` pokazuje zmianę `Observed %` między kolejnymi snapshotami Anthropic w tym
+            samym oknie lub tygodniu. `Norm $/1%` jest liczone w bazie `1x / no promo`,
+            czyli po zdjęciu wpływu promo z usage. `Raw $/1%` zostaje na realnym spendzie.
           </p>
         </div>
 
@@ -365,8 +402,8 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
             <div className="h-3 w-20 bg-[var(--bg-secondary)] rounded" />
             <div className="h-3 w-32 bg-[var(--bg-secondary)] rounded" />
           </div>
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="flex gap-2">
+          {[0, 1, 2, 3].map((skeletonRow) => (
+            <div key={`skeleton-${skeletonRow}`} className="flex gap-2">
               <div className="h-3 w-24 bg-[var(--bg-secondary)] rounded" />
               <div className="h-3 w-12 bg-[var(--bg-secondary)] rounded" />
               <div className="h-3 w-16 bg-[var(--bg-secondary)] rounded" />
@@ -378,7 +415,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
         </div>
       ) : weekGroups.length === 0 ? (
         <p className="text-xs text-[var(--text-muted)]">
-          Brak danych — potrzeba min. 2 kalibracje w jednym tygodniu.
+          Brak danych — potrzeba min. 2 kalibracje w tym samym oknie lub tygodniu.
         </p>
       ) : (
         weekGroups.map((week) => (
@@ -387,19 +424,49 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
               <span className="text-xs font-semibold text-[var(--text-primary)]">
                 {week.weekLabel}
               </span>
+              {week.planShortLabel && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                  style={{
+                    color: week.planColor,
+                    background: `color-mix(in srgb, ${week.planColor} 14%, transparent)`,
+                  }}
+                  title={week.planLabel ?? undefined}
+                >
+                  <span
+                    className="w-1.5 h-1.5 rounded-full"
+                    style={{ background: week.planColor }}
+                  />
+                  {week.planShortLabel}
+                </span>
+              )}
+              <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-muted)]">
+                base 1x / no promo
+              </span>
+              {week.hasPromoAdjustedPoints && (
+                <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--accent-orange)]/12 text-[var(--accent-orange)]">
+                  includes promo-adjusted points
+                </span>
+              )}
               <span className="text-[10px] text-[var(--text-muted)]">
-                {week.pointCount} cal · Δ{week.totalDeltaPct}% covered
+                {week.pointCount} cal · Obs Δ{week.totalDeltaPct}% covered
               </span>
               {week.avgCostPerPct > 0 && (
                 <>
                   <span className="text-[10px] text-[var(--accent-green)] font-medium">
-                    avg {formatCost(week.avgCostPerPct)}/1%
+                    avg raw {formatCost(week.avgRawCostPerPct)}/1%
+                  </span>
+                  <span className="text-[10px] text-[var(--text-muted)]">
+                    ·
+                  </span>
+                  <span className="text-[10px] text-[var(--accent-green)] font-medium">
+                    avg norm {formatCost(week.avgCostPerPct)}/1%
                   </span>
                   <span className="text-[10px] text-[var(--text-muted)]">
                     →
                   </span>
                   <span className="text-[10px] text-[var(--accent-green)] font-medium">
-                    est. {formatCost(week.avgCostPerPct * 100)} @100%
+                    est. {formatCost(week.avgCostPerPct * 100)} norm @100%
                   </span>
                 </>
               )}
@@ -423,8 +490,9 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                   <col />
                   <col />
                   <col />
-                  {/* Per 1%: $/1%, In, Out, CW, CR, Tot */}
+                  {/* Per 1%: Raw $/1%, Norm $/1%, In, Out, CW, CR, Tot */}
                   <col className="border-l border-[var(--border-subtle)]" />
+                  <col />
                   <col />
                   <col />
                   <col />
@@ -440,12 +508,12 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                 <thead>
                   <tr className="text-[9px] uppercase tracking-wider">
                     <th colSpan={3} className="text-left py-0.5 px-1.5 text-[var(--text-muted)] font-normal">
-                      Delta
+                      Observed Δ
                     </th>
                     <th colSpan={5} className="text-left py-0.5 px-1.5 text-[var(--text-muted)] font-normal border-l border-[var(--border-subtle)]">
                       Δ Tokens
                     </th>
-                    <th colSpan={6} className="text-left py-0.5 px-1.5 text-[var(--text-muted)] font-normal border-l border-[var(--border-subtle)]">
+                    <th colSpan={7} className="text-left py-0.5 px-1.5 text-[var(--text-muted)] font-normal border-l border-[var(--border-subtle)]">
                       Per 1% (base)
                     </th>
                     <th colSpan={3} className="text-left py-0.5 px-1.5 text-[var(--text-muted)] font-normal border-l border-[var(--border-subtle)]">
@@ -454,21 +522,22 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                     <th />
                   </tr>
                   <tr className="border-b border-[var(--border-subtle)]">
-                    <th className="text-left py-1 px-1.5 text-[var(--text-muted)] font-medium">Range</th>
-                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Δ%</th>
-                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Δ Cost</th>
+                    <th className="text-left py-1 px-1.5 text-[var(--text-muted)] font-medium">Observed</th>
+                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Obs Δ%</th>
+                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Norm Δ $</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium border-l border-[var(--border-subtle)]">All</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">In</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Out</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">CacheW</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">CacheR</th>
-                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium border-l border-[var(--border-subtle)]">$/1%</th>
+                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium border-l border-[var(--border-subtle)]">Raw $/1%</th>
+                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Norm $/1%</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">In/1%</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Out/1%</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">CW/1%</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">CR/1%</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Tot/1%</th>
-                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium border-l border-[var(--border-subtle)]">Cost</th>
+                    <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium border-l border-[var(--border-subtle)]">Norm Cost</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Output</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Total</th>
                     <th className="text-right py-1 px-1.5 text-[var(--text-muted)] font-medium">Time</th>
@@ -481,7 +550,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                     const hasModels = row.modelDeltas.length > 0;
                     const isExpanded = expandedRows.has(rowKey);
                     return (
-                      <Fragment key={idx}>
+                      <Fragment key={rowKey}>
                         <tr
                           className={`border-b border-[var(--border-subtle)] ${
                             isZero ? "opacity-30" : ""
@@ -525,14 +594,17 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                             style={{
                               color: isZero
                                 ? "var(--text-muted)"
-                                : row.costPerPct > week.avgCostPerPct * 1.5
+                                : row.normalizedCostPerPct > week.avgCostPerPct * 1.5
                                 ? "var(--accent-red)"
-                                : row.costPerPct < week.avgCostPerPct * 0.5
+                                : row.normalizedCostPerPct < week.avgCostPerPct * 0.5
                                 ? "var(--accent-orange)"
                                 : "var(--text-primary)",
                             }}
                           >
-                            {isZero ? "—" : formatCost(row.costPerPct)}
+                            {isZero ? "—" : formatCost(row.rawCostPerPct)}
+                          </td>
+                          <td className="py-1 px-1.5 text-right tabular-nums font-medium text-[var(--accent-green)]">
+                            {isZero ? "—" : formatCost(row.normalizedCostPerPct)}
                           </td>
                           <td className="py-1 px-1.5 text-right tabular-nums text-[var(--text-secondary)] whitespace-nowrap">
                             {isZero ? "—" : fmtTC(row.deltaInput / row.deltaPct, row.deltaInputCost / row.deltaPct)}
@@ -551,7 +623,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                           </td>
                           {/* Est. 100% */}
                           <td className="py-1 px-1.5 text-right tabular-nums text-[var(--accent-green)] border-l border-[var(--border-subtle)]">
-                            {isZero ? "—" : formatCost(row.costPerPct * 100)}
+                            {isZero ? "—" : formatCost(row.normalizedCostPerPct * 100)}
                           </td>
                           <td className="py-1 px-1.5 text-right tabular-nums text-[var(--accent-blue)]">
                             {isZero ? "—" : formatTokens(row.outputPerPct * 100)}
@@ -572,7 +644,7 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                         {isExpanded &&
                           row.modelDeltas.map((md) => (
                             <tr
-                              key={`${idx}-${md.model}`}
+                              key={`${rowKey}-${md.model}`}
                               className="border-b border-[var(--border-subtle)] bg-[var(--bg-secondary)]"
                             >
                               <td className="py-0.5 px-1.5 pl-6 text-[10px] text-[var(--text-muted)] whitespace-nowrap">
@@ -603,6 +675,9 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                                 {md.deltaCost > 0 && row.deltaPct > 0
                                   ? formatCost(md.deltaCost / row.deltaPct)
                                   : "—"}
+                              </td>
+                              <td className="py-0.5 px-1.5 text-right tabular-nums text-[10px] text-[var(--text-muted)]">
+                                —
                               </td>
                               <td className="py-0.5 px-1.5 text-right tabular-nums text-[10px] text-[var(--text-muted)] whitespace-nowrap">
                                 {md.deltaInput > 0 && row.deltaPct > 0
@@ -663,6 +738,9 @@ export function CalibrationDeltaTable({ calibrations, loading }: Props) {
                       </td>
                       {/* Per 1% averages */}
                       <td className="py-1.5 px-1.5 text-right tabular-nums text-[var(--text-primary)] border-l border-[var(--border-subtle)]">
+                        {week.totals.avgRawCostPerPct > 0 ? formatCost(week.totals.avgRawCostPerPct) : "—"}
+                      </td>
+                      <td className="py-1.5 px-1.5 text-right tabular-nums text-[var(--accent-green)]">
                         {week.totals.avgCostPerPct > 0 ? formatCost(week.totals.avgCostPerPct) : "—"}
                       </td>
                       <td className="py-1.5 px-1.5 text-right tabular-nums text-[var(--text-secondary)] whitespace-nowrap">

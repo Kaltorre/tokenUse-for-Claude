@@ -9,15 +9,16 @@ import {
   PromoPeriod,
 } from "./types";
 import { getModelDisplayName } from "./pricing";
+import { getWarsawTimeParts, matchesPromoScheduleInPoland } from "./promo-time";
 
 const WINDOW_DURATION_MS = 5 * 60 * 60 * 1000; // 5 hours
 
 // Off-peak promo: March 13–28, 2026
-// Off-peak = outside 8 AM – 2 PM ET on weekdays
-const PROMO_START = new Date("2026-03-13T00:00:00-04:00"); // ET
-const PROMO_END = new Date("2026-03-29T03:59:00-04:00");   // end of March 28 ET
-const PEAK_HOUR_START = 8;  // 8 AM ET
-const PEAK_HOUR_END = 14;   // 2 PM ET
+// Off-peak = outside 13:00 – 19:00 Poland time on weekdays
+const PROMO_START = new Date("2026-03-13T00:00:00+01:00");
+const PROMO_END = new Date("2026-03-28T23:59:00+01:00");
+const PEAK_HOUR_START = 13;
+const PEAK_HOUR_END = 19;
 
 function totalTokens(e: UsageEntry): number {
   return (
@@ -28,58 +29,8 @@ function totalTokens(e: UsageEntry): number {
   );
 }
 
-/** Find the nth occurrence of a day-of-week in a month (1-indexed day) */
-function nthDayOfMonth(year: number, month: number, dayOfWeek: number, n: number): number {
-  const first = new Date(Date.UTC(year, month, 1)).getUTCDay();
-  return 1 + ((dayOfWeek - first + 7) % 7) + (n - 1) * 7;
-}
-
-/** Get ET offset in ms using DST rules (fast arithmetic, no Intl) */
-function getETOffsetMs(date: Date): number {
-  const year = date.getUTCFullYear();
-  const month = date.getUTCMonth();
-
-  // Apr–Oct: always EDT (UTC-4)
-  if (month >= 3 && month <= 9) return -4 * 3600000;
-  // Dec–Feb: always EST (UTC-5)
-  if (month === 11 || month <= 1) return -5 * 3600000;
-  // March: DST starts 2nd Sunday at 2 AM EST = 7 AM UTC
-  if (month === 2) {
-    const dstStart = Date.UTC(year, 2, nthDayOfMonth(year, 2, 0, 2), 7);
-    return date.getTime() >= dstStart ? -4 * 3600000 : -5 * 3600000;
-  }
-  // November: DST ends 1st Sunday at 2 AM EDT = 6 AM UTC
-  const dstEnd = Date.UTC(year, 10, nthDayOfMonth(year, 10, 0, 1), 6);
-  return date.getTime() < dstEnd ? -4 * 3600000 : -5 * 3600000;
-}
-
-/** Convert UTC Date to Eastern Time hour (0-23) and day of week (0=Sun) */
-function toET(date: Date): { hour: number; dayOfWeek: number; isWeekday: boolean } {
-  const etMs = date.getTime() + getETOffsetMs(date);
-  const et = new Date(etMs);
-  const day = et.getUTCDay();
-  return {
-    hour: et.getUTCHours(),
-    dayOfWeek: day,
-    isWeekday: day >= 1 && day <= 5,
-  };
-}
-
 function matchesPromoSchedule(date: Date, schedule: PromoPeriod["schedule"]): boolean {
-  if (schedule.type === "all-day-all-week") return true;
-
-  const et = toET(date);
-
-  if (schedule.type === "daily-hours") {
-    return et.hour >= schedule.hourFrom && et.hour < schedule.hourTo;
-  }
-
-  if (!schedule.days.includes(et.dayOfWeek)) return false;
-  if (schedule.hourFrom != null && schedule.hourTo != null) {
-    const inRange = et.hour >= schedule.hourFrom && et.hour < schedule.hourTo;
-    return schedule.excludeHours ? !inRange : inRange;
-  }
-  return true;
+  return matchesPromoScheduleInPoland(date, schedule);
 }
 
 function getEntryPromoMultiplier(timestamp: string, promos: PromoPeriod[]): number {
@@ -115,12 +66,47 @@ function sumGroup(group: UsageEntry[]): PeakSplitTokens {
   };
 }
 
+function sumNormalizedUsage(
+  group: UsageEntry[],
+  promos: PromoPeriod[]
+): {
+  normalizedInputTokens: number;
+  normalizedOutputTokens: number;
+  normalizedCacheCreationTokens: number;
+  normalizedCacheReadTokens: number;
+  normalizedTotalTokens: number;
+  normalizedCost: number;
+} {
+  return group.reduce(
+    (acc, entry) => {
+      const multiplier = getEntryPromoMultiplier(entry.timestamp, promos) || 1;
+      acc.normalizedInputTokens += entry.usage.input_tokens / multiplier;
+      acc.normalizedOutputTokens += entry.usage.output_tokens / multiplier;
+      acc.normalizedCacheCreationTokens +=
+        entry.usage.cache_creation_input_tokens / multiplier;
+      acc.normalizedCacheReadTokens +=
+        entry.usage.cache_read_input_tokens / multiplier;
+      acc.normalizedTotalTokens += totalTokens(entry) / multiplier;
+      acc.normalizedCost += entry.cost / multiplier;
+      return acc;
+    },
+    {
+      normalizedInputTokens: 0,
+      normalizedOutputTokens: 0,
+      normalizedCacheCreationTokens: 0,
+      normalizedCacheReadTokens: 0,
+      normalizedTotalTokens: 0,
+      normalizedCost: 0,
+    }
+  );
+}
+
 /** Check if a timestamp falls in the off-peak promo period */
 export function isOffPeak(date: Date): boolean {
   if (date < PROMO_START || date > PROMO_END) return false;
-  const et = toET(date);
-  if (!et.isWeekday) return true; // weekends are always off-peak
-  return et.hour < PEAK_HOUR_START || et.hour >= PEAK_HOUR_END;
+  const local = getWarsawTimeParts(date);
+  if (!local.isWeekday) return true; // weekends are always off-peak
+  return local.hour < PEAK_HOUR_START || local.hour >= PEAK_HOUR_END;
 }
 
 /** Compute precise promo multiplier from peak-split token data.
@@ -135,27 +121,40 @@ export function computeWeightedPromoMultiplier(
 }
 
 /** Determine peak status for a window based on its entries */
-function classifyPeakStatus(entries: UsageEntry[]): PeakStatus {
+function classifyPeakStatus(entries: UsageEntry[], promos: PromoPeriod[]): PeakStatus {
   if (entries.length === 0) return "off-peak";
 
-  let hasOffPeak = false;
-  let hasPeak = false;
+  let hasBonus = false;
+  let hasStandard = false;
+  let hasPromoContext = false;
 
   for (const e of entries) {
     const d = new Date(e.timestamp);
-    if (d < PROMO_START || d > PROMO_END) {
-      // Outside promo period — no peak/off-peak distinction
-      return "off-peak";
-    }
-    if (isOffPeak(d)) {
-      hasOffPeak = true;
+    const multiplier = getEntryPromoMultiplier(e.timestamp, promos);
+    if (multiplier > 1) {
+      hasBonus = true;
+      hasPromoContext = true;
     } else {
-      hasPeak = true;
+      hasStandard = true;
+      const inLegacyPromoWindow =
+        promos.length === 0 && d >= PROMO_START && d <= PROMO_END;
+      const inConfiguredPromoWindow =
+        promos.length > 0 &&
+        promos.some((promo) => {
+          const from = new Date(promo.dateFrom).getTime();
+          const to = new Date(promo.dateTo).getTime();
+          const time = d.getTime();
+          return time >= from && time <= to;
+        });
+      if (inLegacyPromoWindow || inConfiguredPromoWindow) {
+        hasPromoContext = true;
+      }
     }
-    if (hasOffPeak && hasPeak) return "mixed";
+    if (hasBonus && hasStandard) return "mixed";
   }
 
-  return hasOffPeak ? "off-peak" : "peak";
+  if (hasBonus) return "off-peak";
+  return hasPromoContext ? "peak" : "off-peak";
 }
 
 function isSonnetModel(model: string): boolean {
@@ -185,7 +184,7 @@ export function buildFiveHourWindows(entries: UsageEntry[], promos: PromoPeriod[
     if (entryTime >= windowEnd) {
       // Finalize current window
       if (windowEntries.length > 0) {
-        windows.push(buildWindow(windowId++, windowStart, windowEnd, windowEntries));
+        windows.push(buildWindow(windowId++, windowStart, windowEnd, windowEntries, promos));
       }
       // Start new window — snap to full hour
       windowStart = new Date(entryTime);
@@ -199,7 +198,7 @@ export function buildFiveHourWindows(entries: UsageEntry[], promos: PromoPeriod[
 
   // Finalize last window
   if (windowEntries.length > 0) {
-    windows.push(buildWindow(windowId, windowStart, windowEnd, windowEntries));
+    windows.push(buildWindow(windowId, windowStart, windowEnd, windowEntries, promos));
   }
 
   return windows;
@@ -209,7 +208,8 @@ function buildWindow(
   id: number,
   start: Date,
   end: Date,
-  entries: UsageEntry[]
+  entries: UsageEntry[],
+  promos: PromoPeriod[]
 ): FiveHourWindow {
   const now = new Date();
   const isActive = now < end;
@@ -238,7 +238,7 @@ function buildWindow(
     models[name] = m;
   }
 
-  const peakStatus = classifyPeakStatus(entries);
+  const peakStatus = classifyPeakStatus(entries, promos);
 
   let peakSplit: FiveHourWindow["peakSplit"] = undefined;
   if (peakStatus === "mixed") {
@@ -251,10 +251,12 @@ function buildWindow(
       totalCost: group.reduce((s, e) => s + e.cost, 0),
       messageCount: group.length,
     });
-    const offPeakEntries = entries.filter(e => isOffPeak(new Date(e.timestamp)));
-    const peakEntries = entries.filter(e => !isOffPeak(new Date(e.timestamp)));
+    const offPeakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) > 1);
+    const peakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) <= 1);
     peakSplit = { peak: sumGroup(peakEntries), offPeak: sumGroup(offPeakEntries) };
   }
+
+  const normalized = sumNormalizedUsage(entries, promos);
 
   return {
     id,
@@ -270,6 +272,7 @@ function buildWindow(
     cacheReadTokens: entries.reduce((s, e) => s + e.usage.cache_read_input_tokens, 0),
     totalTokens: entries.reduce((s, e) => s + totalTokens(e), 0),
     totalCost: entries.reduce((s, e) => s + e.cost, 0),
+    ...normalized,
     messageCount: entries.length,
     sessionIds,
     models,
@@ -285,7 +288,7 @@ function addLocalWeeks(date: Date, weeks: number): Date {
 }
 
 /** Find the weekly reset anchor (most recent reset point before `now`) */
-function findWeekAnchor(
+export function findWeekAnchor(
   now: Date,
   config: { day: number; hour: number; minute: number }
 ): Date {
@@ -388,6 +391,7 @@ function buildBucketsForFilter(
             offPeak: sumGroup(bonusEntries),
           }
         : undefined;
+    const normalized = sumNormalizedUsage(weekEntries, promos);
 
     buckets.push({
       weekStart: weekStart.toISOString(),
@@ -401,6 +405,7 @@ function buildBucketsForFilter(
       cacheReadTokens: weekEntries.reduce((s, e) => s + e.usage.cache_read_input_tokens, 0),
       totalTokens: weekEntries.reduce((s, e) => s + totalTokens(e), 0),
       totalCost: weekEntries.reduce((s, e) => s + e.cost, 0),
+      ...normalized,
       windowCount: 0, // will be set from windows if needed
       messageCount: weekEntries.length,
       timeRemainingMs: isCurrentWeek ? weekEnd.getTime() - now.getTime() : 0,
@@ -419,12 +424,16 @@ export const DEFAULT_WEEKLY_CONFIG: WeeklyResetConfig = {
 export function buildLimitsData(
   entries: UsageEntry[],
   weeklyConfig: WeeklyResetConfig = DEFAULT_WEEKLY_CONFIG,
-  promos: PromoPeriod[] = []
+  promos: PromoPeriod[] = [],
+  onProgress?: (message: string, current: number, total: number) => void
 ): LimitsData {
+  const totalSteps = 3;
   const windows = buildFiveHourWindows(entries, promos);
+  onProgress?.("Built 5h windows", 1, totalSteps);
   const currentWindow = windows.find((w) => w.status === "active") || null;
 
   const { all: weeklyAll, sonnet: weeklySonnet } = buildWeeklyBuckets(entries, weeklyConfig, promos);
+  onProgress?.("Built weekly buckets", 2, totalSteps);
 
   const now = new Date();
   const currentWeekAll = weeklyAll.find((w) => {
@@ -433,6 +442,7 @@ export function buildLimitsData(
   const currentWeekSonnet = weeklySonnet.find((w) => {
     return now >= new Date(w.weekStart) && now < new Date(w.weekEnd);
   }) || null;
+  onProgress?.("Resolved active limit windows", 3, totalSteps);
 
   return {
     windows,

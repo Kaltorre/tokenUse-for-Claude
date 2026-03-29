@@ -11,6 +11,12 @@ import {
 import { getModelDisplayName } from "./pricing";
 import { buildLimitsData } from "./limits-analyzer";
 
+export type AnalyzeProgressCallback = (
+  message: string,
+  current: number,
+  total: number
+) => void;
+
 function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, T[]> {
   const groups: Record<string, T[]> = {};
   for (const item of items) {
@@ -169,15 +175,35 @@ function buildHourlyStats(entries: UsageEntry[]): { hour: number; tokens: number
   return hourly;
 }
 
-export function analyzeUsage(entries: UsageEntry[], promos: PromoPeriod[] = []): UsageData {
+export function analyzeUsage(
+  entries: UsageEntry[],
+  promos: PromoPeriod[] = [],
+  onProgress?: AnalyzeProgressCallback
+): UsageData {
+  const totalSteps = 9;
+  let step = 0;
+  const report = (message: string) => {
+    step += 1;
+    onProgress?.(message, step, totalSteps);
+  };
+
   const daily = buildDailyStats(entries);
+  report("Built daily aggregates");
+
   const sessionGroups = groupBy(entries, (e) => e.sessionId);
   const sessions = Object.entries(sessionGroups)
     .map(([id, es]) => buildSessionStats(id, es))
     .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+  report("Built session aggregates");
+
   const projects = buildProjectStats(entries);
+  report("Built project aggregates");
+
   const models = buildModelStats(entries);
+  report("Built model aggregates");
+
   const hourly = buildHourlyStats(entries);
+  report("Built hourly aggregates");
 
   // Overview calculations
   const now = new Date();
@@ -217,8 +243,13 @@ export function analyzeUsage(entries: UsageEntry[], promos: PromoPeriod[] = []):
     peakDay: peakDay?.date || "N/A",
     peakDayTokens: peakDay?.totalTokens || 0,
   };
+  report("Built overview summary");
 
-  const limits = buildLimitsData(entries, undefined, promos);
+  const limits = buildLimitsData(entries, undefined, promos, (limitsMessage, limitsStep, limitsTotal) => {
+    const mappedCurrent = 6 + Math.min(limitsStep, limitsTotal);
+    onProgress?.(limitsMessage, mappedCurrent, totalSteps);
+    step = mappedCurrent;
+  });
 
   return { overview, daily, sessions, projects, models, hourly, limits };
 }

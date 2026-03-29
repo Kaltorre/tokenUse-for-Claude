@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import {
   CalibrationPoint,
   CalibrationScope,
+  EstimationMethod,
   FiveHourWindow,
   PlanPeriod,
   PlanTier,
@@ -16,6 +17,7 @@ import {
   LimitOverrideEntry,
   getDefaultLimits,
 } from "@/lib/types";
+import { LimitSourceMode } from "@/lib/limit-source";
 import type { AnomalyTag, AnomalyFlag } from "@/lib/types";
 import { formatTokens, formatCost } from "@/lib/format";
 import {
@@ -45,6 +47,8 @@ interface Props {
   planPeriods?: PlanPeriod[];
   limitOverrides?: LimitOverridesMap;
   onLimitOverridesChange?: () => void | Promise<void>;
+  limitSourceMode: LimitSourceMode;
+  onLimitSourceModeChange: (mode: LimitSourceMode) => void;
 }
 
 function formatTime(iso: string): string {
@@ -699,7 +703,13 @@ interface CalibrationDialogInitial {
 
 interface CalibrationDialogProps {
   initial?: CalibrationDialogInitial;
-  onSave: (pctSession: number | null, pctWeeklyAll: number | null, pctWeeklySonnet: number | null, observedAt: string) => Promise<void>;
+  onSave: (
+    pctSession: number | null,
+    pctWeeklyAll: number | null,
+    pctWeeklySonnet: number | null,
+    observedAt: string,
+    onStatus?: (message: string) => void
+  ) => Promise<void>;
   onClose: () => void;
 }
 
@@ -710,6 +720,8 @@ function CalibrationDialog({ initial, onSave, onClose }: CalibrationDialogProps)
   const [pctWeeklySonnet, setPctWeeklySonnet] = useState(initial?.pctWeeklySonnet != null ? String(initial.pctWeeklySonnet) : "");
   const [observedAt, setObservedAt] = useState(initial ? toDatetimeLocal(new Date(initial.observedAt)) : toDatetimeLocal(new Date()));
   const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -729,14 +741,19 @@ function CalibrationDialog({ initial, onSave, onClose }: CalibrationDialogProps)
   const handleSave = async () => {
     if (!hasAnyValue) return;
     setSaving(true);
+    setSaveError(null);
+    setSaveStatus(initial ? "Updating calibration..." : "Saving calibration...");
     try {
       await onSave(
         parseOpt(pctSession),
         parseOpt(pctWeeklyAll),
         parseOpt(pctWeeklySonnet),
         new Date(observedAt).toISOString(),
+        setSaveStatus,
       );
       onClose();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Failed to save calibration");
     } finally {
       setSaving(false);
     }
@@ -763,6 +780,7 @@ function CalibrationDialog({ initial, onSave, onClose }: CalibrationDialogProps)
               type="datetime-local"
               value={observedAt}
               onChange={(e) => setObservedAt(e.target.value)}
+              disabled={saving}
               style={{ colorScheme: "dark" }}
               className={inputClass}
             />
@@ -782,6 +800,7 @@ function CalibrationDialog({ initial, onSave, onClose }: CalibrationDialogProps)
                   value={pctSession}
                   onChange={(e) => setPctSession(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSave()}
+                  disabled={saving}
                   placeholder="10"
                   className={inputClass}
                 />
@@ -801,6 +820,7 @@ function CalibrationDialog({ initial, onSave, onClose }: CalibrationDialogProps)
                   value={pctWeeklyAll}
                   onChange={(e) => setPctWeeklyAll(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSave()}
+                  disabled={saving}
                   placeholder="2"
                   className={inputClass}
                 />
@@ -820,6 +840,7 @@ function CalibrationDialog({ initial, onSave, onClose }: CalibrationDialogProps)
                   value={pctWeeklySonnet}
                   onChange={(e) => setPctWeeklySonnet(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSave()}
+                  disabled={saving}
                   placeholder="0"
                   className={inputClass}
                 />
@@ -829,9 +850,27 @@ function CalibrationDialog({ initial, onSave, onClose }: CalibrationDialogProps)
           </div>
         </div>
 
+        {saving && (
+          <div className="mb-4">
+            <div className="h-1.5 bg-[var(--bg-secondary)] rounded-full overflow-hidden">
+              <div className="h-full w-1/3 bg-gradient-to-r from-transparent via-[var(--accent-blue)] to-transparent rounded-full animate-[shimmer_1.5s_ease-in-out_infinite]" />
+            </div>
+            <p className="text-[11px] text-[var(--text-muted)] mt-2">
+              {saveStatus ?? "Saving calibration..."}
+            </p>
+          </div>
+        )}
+
+        {saveError && (
+          <p className="text-[11px] text-[var(--accent-red)] mb-4">
+            {saveError}
+          </p>
+        )}
+
         <div className="flex gap-2 justify-end">
           <button
             onClick={onClose}
+            disabled={saving}
             className="px-4 py-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
           >
             Cancel
@@ -948,6 +987,24 @@ function calibratedPlanLimits(
   };
 }
 
+/** Get plan limits using a specific estimation method */
+function calibratedPlanLimitsByMethod(
+  solved: SolvedLimits,
+  tier: PlanTier,
+  method: EstimationMethod
+): PlanLimits | null {
+  const entry = solved.methods.find((m) => m.method === method);
+  if (!entry || entry.confidence <= 0) return null;
+  const m = PLAN_TIERS[tier].multiplier;
+  const base = 20;
+  return {
+    outputLimit: Math.round((entry.outputLimit / base) * m),
+    inputOutputLimit: Math.round((entry.inputOutputLimit / base) * m),
+    totalLimit: Math.round((entry.totalLimit / base) * m),
+    costLimit: Math.round(((entry.costLimit / base) * m) * 100) / 100,
+  };
+}
+
 type LimitField = "costLimit" | "outputLimit" | "inputOutputLimit" | "totalLimit";
 
 function EditableCell({
@@ -1033,16 +1090,32 @@ function EditableCell({
   );
 }
 
+type CalibrationSource = "off" | "best" | "cost" | "direct";
+
+const CALIBRATION_SOURCES: { key: CalibrationSource; label: string; shortLabel: string; color: string; description: string }[] = [
+  { key: "off", label: "OFF", shortLabel: "OFF", color: "var(--text-muted)", description: "Domyślne hardcoded" },
+  { key: "best", label: "Best", shortLabel: "Best", color: "var(--accent-green)", description: "Ensemble (wszystkie metody)" },
+  { key: "cost", label: "USD", shortLabel: "$", color: "var(--accent-orange)", description: "Kalibracja z kosztu ($)" },
+  { key: "direct", label: "5h", shortLabel: "5h", color: "var(--accent-blue)", description: "Kalibracja z tokenów" },
+];
+
 function CalibratedPlanLimitsTable({
   solvedLimits,
   overrides,
   onOverrideChange,
+  limitSourceMode,
+  onLimitSourceModeChange,
 }: {
   solvedLimits: Record<CalibrationScope, SolvedLimits>;
   overrides: LimitOverridesMap;
   onOverrideChange: () => void;
+  limitSourceMode: LimitSourceMode;
+  onLimitSourceModeChange: (mode: LimitSourceMode) => void;
 }) {
-  const [useCalibrated, setUseCalibrated] = useState(true);
+  // Derive initial calibration source from global mode
+  const [calSource, setCalSource] = useState<CalibrationSource>(
+    limitSourceMode === "calibrated" ? "best" : "off"
+  );
 
   const scopes: { key: string; label: string; scopeKey: CalibrationScope; defaultWindow: "5h" | "weekly" }[] = [
     { key: "5h", label: "5-Hour Window", scopeKey: "5h", defaultWindow: "5h" },
@@ -1062,106 +1135,182 @@ function CalibratedPlanLimitsTable({
     onOverrideChange();
   };
 
-  // Check if any scope has calibration data
-  const hasAnyCalibration = scopes.some(({ scopeKey }) => {
-    const s = solvedLimits[scopeKey];
-    return s.methods.length > 0 && s.best.confidence > 0;
-  });
+  // Check available calibration methods per scope
+  const availableMethods = useMemo(() => {
+    const methods = new Set<string>();
+    for (const { scopeKey } of scopes) {
+      const s = solvedLimits[scopeKey];
+      if (s.methods.length > 0 && s.best.confidence > 0) {
+        methods.add("best");
+        for (const m of s.methods) {
+          if (m.confidence > 0) methods.add(m.method);
+        }
+      }
+    }
+    return methods;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [solvedLimits]);
+
+  const hasAnyCalibration = availableMethods.size > 0;
+
+  const handleSourceChange = (source: CalibrationSource) => {
+    setCalSource(source);
+    onLimitSourceModeChange(source === "off" ? "manual" : "calibrated");
+  };
+
+  const useCalibrated = calSource !== "off";
+
+  // Get limits for a given scope and tier based on selected source
+  const getLimitsForTier = (solved: SolvedLimits, tier: PlanTier, defaultWindow: "5h" | "weekly"): PlanLimits | null => {
+    if (!useCalibrated || solved.methods.length === 0 || solved.best.confidence <= 0) {
+      return getDefaultLimits(tier, defaultWindow);
+    }
+    if (calSource === "best") {
+      return calibratedPlanLimits(solved, tier);
+    }
+    // Try specific method, fall back to best
+    const methodLimits = calibratedPlanLimitsByMethod(solved, tier, calSource as EstimationMethod);
+    return methodLimits ?? calibratedPlanLimits(solved, tier);
+  };
+
+  // Get confidence for current source
+  const getSourceConfidence = (solved: SolvedLimits): number | null => {
+    if (!useCalibrated || solved.methods.length === 0) return null;
+    if (calSource === "best") return solved.best.confidence;
+    const entry = solved.methods.find((m) => m.method === calSource);
+    return entry?.confidence ?? null;
+  };
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
+    <div className="flex gap-5">
+      {/* Left sidebar — calibration source selector */}
+      <div className="shrink-0 w-[88px] space-y-1.5">
+        <div className="text-[9px] uppercase tracking-wider text-[var(--text-muted)] font-semibold mb-2 px-1">
+          Kalibracja
+        </div>
+        {CALIBRATION_SOURCES.map(({ key, label, color, description }) => {
+          const isActive = calSource === key;
+          const isAvailable = key === "off" || availableMethods.has(key);
+          return (
+            <button
+              key={key}
+              onClick={() => isAvailable && handleSourceChange(key)}
+              disabled={!isAvailable}
+              title={description}
+              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11px] font-medium transition-all text-left ${
+                isActive
+                  ? "ring-1 shadow-sm"
+                  : "hover:bg-[var(--bg-secondary)]"
+              } ${!isAvailable ? "opacity-40 cursor-default" : "cursor-pointer"}`}
+              style={{
+                color: isActive ? color : "var(--text-muted)",
+                background: isActive ? `color-mix(in srgb, ${color} 10%, transparent)` : undefined,
+                boxShadow: isActive ? `0 0 0 1px ${color}` : undefined,
+              }}
+            >
+              <span
+                className="w-2 h-2 rounded-full shrink-0 transition-colors"
+                style={{ background: isActive ? color : "var(--text-muted)" }}
+              />
+              {label}
+            </button>
+          );
+        })}
+        <p className="text-[8px] text-[var(--text-muted)] leading-tight px-1 pt-1">
+          {calSource === "off" && "Hardcoded defaults"}
+          {calSource === "best" && "Ensemble z wszystkich metod"}
+          {calSource === "cost" && "Z kosztu API ($)"}
+          {calSource === "direct" && "Z tokenów bezpośrednio"}
+        </p>
+      </div>
+
+      {/* Right — tables */}
+      <div className="flex-1 min-w-0 space-y-4">
         <p className="text-[10px] text-[var(--text-muted)]">
           Limity per plan. Kliknij wartość aby edytować.
           <span className="border-b border-dashed border-[var(--text-muted)] ml-1">Podkreślone</span> = ręcznie nadpisane.
         </p>
-        {hasAnyCalibration && (
-          <button
-            onClick={() => setUseCalibrated((v) => !v)}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all border ${
-              useCalibrated
-                ? "border-[var(--accent-green)] text-[var(--accent-green)] bg-[var(--accent-green)]/10"
-                : "border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full transition-colors ${useCalibrated ? "bg-[var(--accent-green)]" : "bg-[var(--text-muted)]"}`} />
-            {useCalibrated ? "Kalibracja ON" : "Kalibracja OFF"}
-          </button>
-        )}
+
+        {scopes.map(({ key, label, scopeKey, defaultWindow }) => {
+          const solved = solvedLimits[scopeKey];
+          const conf = getSourceConfidence(solved);
+          const hasData = useCalibrated && conf !== null && conf > 0;
+          const usingFallback = useCalibrated && calSource !== "best" &&
+            !solved.methods.some((m) => m.method === calSource && m.confidence > 0) &&
+            solved.best.confidence > 0;
+
+          return (
+            <div key={key}>
+              <div className="flex items-center gap-2 mb-2">
+                <h4 className="text-xs font-semibold text-[var(--text-secondary)]">
+                  {label}
+                </h4>
+                {hasData && conf != null && (
+                  <ConfidenceBadge confidence={conf} />
+                )}
+                {usingFallback && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--accent-orange)]/10 text-[var(--accent-orange)] font-medium">
+                    fallback → best
+                  </span>
+                )}
+                {!hasData && !usingFallback && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-muted)] font-medium">
+                    default
+                  </span>
+                )}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="border-b border-[var(--border-subtle)]">
+                      <th className="text-left py-1.5 px-2 text-[var(--text-muted)] font-medium">Plan</th>
+                      <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Mult</th>
+                      <th className={`text-right py-1.5 px-2 font-medium ${calSource === "cost" ? "text-[var(--accent-orange)]" : "text-[var(--accent-orange)]"}`}>Cost Limit</th>
+                      <th className={`text-right py-1.5 px-2 font-medium ${calSource === "direct" ? "text-[var(--accent-blue)]" : "text-[var(--text-muted)]"}`}>Output</th>
+                      <th className={`text-right py-1.5 px-2 font-medium ${calSource === "direct" ? "text-[var(--accent-blue)]" : "text-[var(--text-muted)]"}`}>In+Out</th>
+                      <th className={`text-right py-1.5 px-2 font-medium ${calSource === "direct" ? "text-[var(--accent-blue)]" : "text-[var(--text-muted)]"}`}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {PLAN_TIER_KEYS.map((tier) => {
+                      const info = PLAN_TIERS[tier];
+                      const lim = getLimitsForTier(solved, tier, defaultWindow);
+                      if (!lim) return null;
+                      const oKey = `${tier}:${key}`;
+                      const ov = overrides[oKey];
+                      return (
+                        <tr key={tier} className="border-b border-[var(--border-subtle)]">
+                          <td className="py-1.5 px-2 font-medium" style={{ color: info.color }}>
+                            {info.label}
+                            <span className="text-[var(--text-muted)] font-normal ml-1">
+                              ${info.monthlyPrice}/mo
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                            {info.multiplier}x
+                          </td>
+                          <EditableCell value={lim.costLimit} overrideValue={ov?.costLimit} field="costLimit" overrideKey={oKey} isCost color="var(--accent-orange)" bold onSave={saveOverride} />
+                          <EditableCell value={lim.outputLimit} overrideValue={ov?.outputLimit} field="outputLimit" overrideKey={oKey} onSave={saveOverride} />
+                          <EditableCell value={lim.inputOutputLimit} overrideValue={ov?.inputOutputLimit} field="inputOutputLimit" overrideKey={oKey} onSave={saveOverride} />
+                          <EditableCell value={lim.totalLimit} overrideValue={ov?.totalLimit} field="totalLimit" overrideKey={oKey} onSave={saveOverride} />
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })}
+
+        <p className="text-[9px] text-[var(--text-muted)]">
+          {calSource === "off" && "Domyślne limity (hardcoded base), skalowane mnożnikiem planu."}
+          {calSource === "best" && "Baza: ensemble z kalibracji (Max $200), skalowane mnożnikiem planu."}
+          {calSource === "cost" && "Baza: kalibracja cost ($), skalowane mnożnikiem planu."}
+          {calSource === "direct" && "Baza: kalibracja z tokenów (direct), skalowane mnożnikiem planu."}
+          {" "}Podczas promo 2x off-peak limity się podwajają.
+        </p>
       </div>
-
-      {scopes.map(({ key, label, scopeKey, defaultWindow }) => {
-        const solved = solvedLimits[scopeKey];
-        const hasData = useCalibrated && solved.methods.length > 0 && solved.best.confidence > 0;
-
-        return (
-          <div key={key}>
-            <div className="flex items-center gap-2 mb-2">
-              <h4 className="text-xs font-semibold text-[var(--text-secondary)]">
-                {label}
-              </h4>
-              {hasData && (
-                <ConfidenceBadge confidence={solved.best.confidence} />
-              )}
-              {!hasData && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-muted)] font-medium">
-                  default
-                </span>
-              )}
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-[11px]">
-                <thead>
-                  <tr className="border-b border-[var(--border-subtle)]">
-                    <th className="text-left py-1.5 px-2 text-[var(--text-muted)] font-medium">Plan</th>
-                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Mult</th>
-                    <th className="text-right py-1.5 px-2 text-[var(--accent-orange)] font-medium">Cost Limit</th>
-                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Output</th>
-                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">In+Out</th>
-                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {PLAN_TIER_KEYS.map((tier) => {
-                    const info = PLAN_TIERS[tier];
-                    const lim = hasData
-                      ? calibratedPlanLimits(solved, tier)
-                      : getDefaultLimits(tier, defaultWindow);
-                    if (!lim) return null;
-                    const oKey = `${tier}:${key}`;
-                    const ov = overrides[oKey];
-                    return (
-                      <tr key={tier} className="border-b border-[var(--border-subtle)]">
-                        <td className="py-1.5 px-2 font-medium" style={{ color: info.color }}>
-                          {info.label}
-                          <span className="text-[var(--text-muted)] font-normal ml-1">
-                            ${info.monthlyPrice}/mo
-                          </span>
-                        </td>
-                        <td className="py-1.5 px-2 text-right tabular-nums text-[var(--text-muted)]">
-                          {info.multiplier}x
-                        </td>
-                        <EditableCell value={lim.costLimit} overrideValue={ov?.costLimit} field="costLimit" overrideKey={oKey} isCost color="var(--accent-orange)" bold onSave={saveOverride} />
-                        <EditableCell value={lim.outputLimit} overrideValue={ov?.outputLimit} field="outputLimit" overrideKey={oKey} onSave={saveOverride} />
-                        <EditableCell value={lim.inputOutputLimit} overrideValue={ov?.inputOutputLimit} field="inputOutputLimit" overrideKey={oKey} onSave={saveOverride} />
-                        <EditableCell value={lim.totalLimit} overrideValue={ov?.totalLimit} field="totalLimit" overrideKey={oKey} onSave={saveOverride} />
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        );
-      })}
-
-      <p className="text-[9px] text-[var(--text-muted)]">
-        {useCalibrated && hasAnyCalibration
-          ? "Baza: solved limits z kalibracji (Max $200), skalowane mnożnikiem planu."
-          : "Domyślne limity (hardcoded base), skalowane mnożnikiem planu."
-        }
-        {" "}Podczas promo 2x off-peak limity się podwajają.
-      </p>
     </div>
   );
 }
@@ -1177,30 +1326,56 @@ export function CalibrationPanel({
   planPeriods = [],
   limitOverrides = {},
   onLimitOverridesChange,
+  limitSourceMode,
+  onLimitSourceModeChange,
 }: Props) {
   const [subTab, setSubTab] = useState<CalSubTab>("points");
   const [showDialog, setShowDialog] = useState(false);
   const [editingGroup, setEditingGroup] = useState<ReturnType<typeof groupByObservation>[0] | null>(null);
   const [flaggingPointId, setFlaggingPointId] = useState<string | null>(null);
 
+  const parseError = async (response: Response, fallback: string) => {
+    if (response.ok) return;
+    try {
+      const payload = (await response.json()) as { error?: string };
+      throw new Error(payload.error || fallback);
+    } catch (error) {
+      if (error instanceof Error) throw error;
+      throw new Error(fallback);
+    }
+  };
+
   const handleSave = async (
     s: number | null,
     wa: number | null,
     ws: number | null,
     isoTime: string,
+    onStatus?: (message: string) => void,
   ) => {
     const scopes: { scope: CalibrationScope; pct: number }[] = [];
     if (s !== null) scopes.push({ scope: "5h", pct: s });
     if (wa !== null) scopes.push({ scope: "weekly-all", pct: wa });
     if (ws !== null) scopes.push({ scope: "weekly-sonnet", pct: ws });
 
-    for (const { scope, pct } of scopes) {
-      await fetch("/api/calibrations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reportedPct: pct, scope, observedAt: isoTime }),
-      });
-    }
+    onStatus?.(
+      scopes.length > 1
+        ? `Calculating snapshots and saving ${scopes.length} points...`
+        : "Calculating snapshot and saving point..."
+    );
+    const response = await fetch("/api/calibrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        points: scopes.map(({ scope, pct }) => ({
+          reportedPct: pct,
+          scope,
+          observedAt: isoTime,
+        })),
+      }),
+    });
+    await parseError(response, "Failed to save calibration");
+
+    onStatus?.("Refreshing calibration list...");
     await onCalibrationChange();
   };
 
@@ -1210,30 +1385,47 @@ export function CalibrationPanel({
     wa: number | null,
     ws: number | null,
     isoTime: string,
+    onStatus?: (message: string) => void,
   ) => {
     const scopeEntries: [CalibrationScope, number | null][] = [
       ["5h", s],
       ["weekly-all", wa],
       ["weekly-sonnet", ws],
     ];
+    const totalOps = scopeEntries.reduce((count, [scope, newPct]) => {
+      const existing = group.points[scope];
+      return existing || newPct !== null ? count + 1 : count;
+    }, 0);
+    let opIndex = 0;
+
     for (const [scope, newPct] of scopeEntries) {
       const existing = group.points[scope];
       if (existing && newPct !== null) {
-        await fetch("/api/calibrations", {
+        opIndex += 1;
+        onStatus?.(`Updating calibration ${opIndex}/${totalOps}...`);
+        const response = await fetch("/api/calibrations", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: existing.id, reportedPct: newPct, observedAt: isoTime }),
         });
+        await parseError(response, "Failed to update calibration");
       } else if (existing && newPct === null) {
-        await fetch(`/api/calibrations?id=${existing.id}`, { method: "DELETE" });
+        opIndex += 1;
+        onStatus?.(`Removing calibration ${opIndex}/${totalOps}...`);
+        const response = await fetch(`/api/calibrations?id=${existing.id}`, { method: "DELETE" });
+        await parseError(response, "Failed to delete calibration");
       } else if (!existing && newPct !== null) {
-        await fetch("/api/calibrations", {
+        opIndex += 1;
+        onStatus?.(`Creating calibration ${opIndex}/${totalOps}...`);
+        const response = await fetch("/api/calibrations", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reportedPct: newPct, scope, observedAt: isoTime }),
         });
+        await parseError(response, "Failed to create calibration");
       }
     }
+    onStatus?.("Refreshing calibration list...");
     await onCalibrationChange();
   };
 
@@ -1328,6 +1520,8 @@ export function CalibrationPanel({
             solvedLimits={solvedLimits}
             overrides={limitOverrides}
             onOverrideChange={onLimitOverridesChange ?? (() => {})}
+            limitSourceMode={limitSourceMode}
+            onLimitSourceModeChange={onLimitSourceModeChange}
           />
         </div>
       )}

@@ -17,15 +17,14 @@ import {
   calcUtilization,
   BOTTLENECK_LABELS,
   BOTTLENECK_COLORS,
-  isInPromoRange,
-  isInPromoSchedule,
 } from "@/lib/utilization";
 import {
   getCalibrationForWindow,
   estimateUtilization,
   findCalibrationAnchor,
+  findCalibrationSeries,
 } from "@/lib/calibration";
-import { computeWeightedPromoMultiplier } from "@/lib/limits-analyzer";
+import { computeLimitInsight } from "@/lib/limit-insights";
 import { getPlanTierForDate } from "@/lib/plans";
 
 interface Props {
@@ -118,7 +117,7 @@ interface WindowUtilInfo {
   actual: number | null;
   /** Estimated (from solver or derived limits) */
   estimated: number | null;
-  /** Delta: estimated - actual */
+  /** Delta: observed - estimated */
   delta: number | null;
   /** Is this calibrated (actual) or estimated? */
   isCalibrated: boolean;
@@ -138,6 +137,7 @@ function getWindowUtil(
   solvedLimits: Record<CalibrationScope, SolvedLimits> | null,
   promoPeriods: PromoPeriod[] = [],
   planMultiplier: number = 1,
+  calibrationSeries: CalibrationPoint[] = [],
   calibrationAnchor?: CalibrationPoint
 ): WindowUtilInfo | null {
   const cal = getCalibrationForWindow(win.id, calibrations);
@@ -167,6 +167,7 @@ function getWindowUtil(
       win.peakSplit,
       promoPeriods,
       planMultiplier,
+      calibrationSeries,
       calibrationAnchor
     );
     if (est) estimated = est;
@@ -211,7 +212,7 @@ function getWindowUtil(
   return {
     actual: actualPct,
     estimated: estPct,
-    delta: actualPct !== null && estPct !== null ? Math.round((estPct - actualPct) * 10) / 10 : null,
+    delta: actualPct !== null && estPct !== null ? Math.round((actualPct - estPct) * 10) / 10 : null,
     isCalibrated: cal !== null,
     bottleneckLabel: bLabel,
     bottleneckColor: bColor,
@@ -236,6 +237,64 @@ interface WeekGroup {
   weekUtilSum: number;
   weekWindowCount: number;
   calibratedCount: number;
+}
+
+function emptyPeakTokens() {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 0,
+    totalCost: 0,
+    messageCount: 0,
+  };
+}
+
+function aggregateWeeklyPeakSplit(windows: FiveHourWindow[]): {
+  peakStatus: "peak" | "off-peak" | "mixed";
+  peakSplit?: NonNullable<FiveHourWindow["peakSplit"]>;
+} {
+  const peak = emptyPeakTokens();
+  const offPeak = emptyPeakTokens();
+
+  const add = (
+    target: ReturnType<typeof emptyPeakTokens>,
+    source: ReturnType<typeof emptyPeakTokens>
+  ) => {
+    target.inputTokens += source.inputTokens;
+    target.outputTokens += source.outputTokens;
+    target.cacheCreationTokens += source.cacheCreationTokens;
+    target.cacheReadTokens += source.cacheReadTokens;
+    target.totalTokens += source.totalTokens;
+    target.totalCost += source.totalCost;
+    target.messageCount += source.messageCount;
+  };
+
+  for (const win of windows) {
+    if (win.peakSplit) {
+      add(peak, win.peakSplit.peak);
+      add(offPeak, win.peakSplit.offPeak);
+      continue;
+    }
+
+    const bucket = {
+      inputTokens: win.inputTokens,
+      outputTokens: win.outputTokens,
+      cacheCreationTokens: win.cacheCreationTokens,
+      cacheReadTokens: win.cacheReadTokens,
+      totalTokens: win.totalTokens,
+      totalCost: win.totalCost,
+      messageCount: win.messageCount,
+    };
+
+    if (win.peakStatus === "off-peak") add(offPeak, bucket);
+    else add(peak, bucket);
+  }
+
+  if (offPeak.totalTokens === 0) return { peakStatus: "peak" };
+  if (peak.totalTokens === 0) return { peakStatus: "off-peak", peakSplit: { peak, offPeak } };
+  return { peakStatus: "mixed", peakSplit: { peak, offPeak } };
 }
 
 const DEFAULT_RESET = { day: 0, hour: 9, minute: 0 }; // Sunday 9:00 AM
@@ -326,7 +385,8 @@ export function FiveHourTimeline({
     const winPlanTier = getPlanTierForDate(win.startTime, planPeriods);
     const winPlanMult = (winPlanTier ? PLAN_TIERS[winPlanTier].multiplier : 20) / 20;
     const winAnchor = findCalibrationAnchor(calibrations, "5h", win.startTime);
-    const util = getWindowUtil(win, derivedLimits, calibrations, solvedLimits, promoPeriods, winPlanMult, winAnchor);
+    const winSeries = findCalibrationSeries(calibrations, "5h", win.startTime);
+    const util = getWindowUtil(win, derivedLimits, calibrations, solvedLimits, promoPeriods, winPlanMult, winSeries, winAnchor);
     if (util) {
       group.weekUtilSum += util.actual ?? util.estimated ?? 0;
       if (util.isCalibrated) group.calibratedCount++;
@@ -360,81 +420,39 @@ export function FiveHourTimeline({
         {weekGroups.map((group) => {
           let lastDateStr = "";
 
-          // Calculate estimated weekly utilization
-          // 1. Try solvedLimits["weekly-all"] first (calibration-based)
-          let weeklyEst: {
-            pct: number;
-            bottleneck: string;
-            outputPct: number;
-            ioPct: number;
-            totalPct: number;
-          } | null = null;
-
           const weeklySolved = solvedLimits?.["weekly-all"];
           const weekPlanTier = getPlanTierForDate(group.weekStart.toISOString(), planPeriods);
           const weekPlanMult = (weekPlanTier ? PLAN_TIERS[weekPlanTier].multiplier : 20) / 20;
           const weekAnchor = findCalibrationAnchor(calibrations, "weekly-all", group.weekStart.toISOString());
-          if (weeklySolved && weeklySolved.best.confidence > 0) {
-            const est = estimateUtilization(
-              {
-                output: group.weekTotalOutput,
-                input: group.weekTotalInput,
-                cacheWrite: group.weekTotalCacheWrite,
-                cacheRead: group.weekTotalCacheRead,
-                total: group.weekTotalTokens,
-              },
-              group.weekTotalCost,
-              weeklySolved,
-              "peak",  // no promo multiplier — weekly limit is already calibrated as-is
-              group.weekStart.toISOString(),
-              undefined,
-              promoPeriods,
-              weekPlanMult,
-              weekAnchor
-            );
-            if (est) {
-              weeklyEst = {
-                pct: est.estimatedPct,
-                bottleneck: est.bottleneck,
-                outputPct: est.outputPct,
-                ioPct: est.ioPct,
-                totalPct: est.totalPct,
-              };
-            }
-          }
+          const weekSeries = findCalibrationSeries(calibrations, "weekly-all", group.weekStart.toISOString());
+          const weeklySplit = aggregateWeeklyPeakSplit(group.windows);
+          const weeklyInsight = computeLimitInsight({
+            scope: "weekly-all",
+            usage: {
+              outputTokens: group.weekTotalOutput,
+              inputTokens: group.weekTotalInput,
+              cacheCreationTokens: group.weekTotalCacheWrite,
+              cacheReadTokens: group.weekTotalCacheRead,
+              totalTokens: group.weekTotalTokens,
+              totalCost: group.weekTotalCost,
+              peakStatus: weeklySplit.peakStatus,
+              peakSplit: weeklySplit.peakSplit,
+              windowStart: group.weekStart.toISOString(),
+            },
+            solvedLimits: solvedLimits ?? null,
+            derivedLimits,
+            promos: promoPeriods,
+            planMultiplier: weekPlanMult,
+            calibrationSeries: weekSeries,
+            calibrationAnchor: weekAnchor,
+            observedPoint: weekAnchor,
+          });
 
-          // 2. Fallback to derivedLimits
-          if (!weeklyEst && derivedLimits) {
-            const util = calcUtilization(
-              {
-                outputTokens: group.weekTotalOutput,
-                inputTokens: group.weekTotalInput,
-                totalTokens: group.weekTotalTokens,
-              },
-              derivedLimits,
-              "peak",  // no promo multiplier for weekly aggregate
-              group.weekStart.toISOString(),
-              "weekly",
-              undefined,
-              promoPeriods,
-              weekPlanMult
-            );
-            if (util) {
-              weeklyEst = {
-                pct: util.effectivePct,
-                bottleneck: util.bottleneck,
-                outputPct: util.outputPct,
-                ioPct: util.inoutPct,
-                totalPct: util.totalPct,
-              };
-            }
-          }
-
-          const weeklyPct = weeklyEst?.pct ?? 0;
-          const weeklyBottleneck = weeklyEst?.bottleneck ?? "output";
-          const weeklyColor = weeklyEst
-            ? BOTTLENECK_COLORS[weeklyBottleneck as keyof typeof BOTTLENECK_COLORS] ?? "var(--accent-orange)"
-            : "var(--accent-orange)";
+          const weeklyPct = weeklyInsight.estimatedPct ?? 0;
+          const weeklyBottleneck = weeklyInsight.bottleneck ?? "output";
+          const weeklyColor =
+            BOTTLENECK_COLORS[weeklyBottleneck as keyof typeof BOTTLENECK_COLORS] ??
+            "var(--accent-orange)";
 
           return (
             <div key={group.weekKey}>
@@ -467,7 +485,7 @@ export function FiveHourTimeline({
                 </div>
 
                 {/* Weekly estimated utilization — thick bar */}
-                {weeklyEst && weeklyPct > 0 && (
+                {weeklyInsight.estimatedPct !== null && weeklyPct > 0 && (
                   <button
                     onClick={() => setWeekExpanded(weekExpanded === group.weekKey ? null : group.weekKey)}
                     className="w-full text-left"
@@ -489,9 +507,19 @@ export function FiveHourTimeline({
                       <span
                         className="w-32 text-right text-[11px] tabular-nums shrink-0 font-semibold"
                         style={{ color: weeklyColor }}
-                        title={`OUT ${weeklyEst.outputPct.toFixed(1)}% | I/O ${weeklyEst.ioPct.toFixed(1)}% | TOT ${weeklyEst.totalPct.toFixed(1)}%`}
+                        title={
+                          weeklyInsight.noPromoPct !== null
+                            ? `Est ${weeklyPct.toFixed(1)}% | No promo ${weeklyInsight.noPromoPct.toFixed(1)}%`
+                            : `Est ${weeklyPct.toFixed(1)}%`
+                        }
                       >
                         {weeklyPct.toFixed(0)}%
+                        {weeklyInsight.noPromoPct !== null && (
+                          <span className="text-[var(--accent-orange)] ml-1">
+                            ({weeklyInsight.noPromoPct.toFixed(0)}%
+                            <span className="text-[9px]"> no promo</span>)
+                          </span>
+                        )}
                         <span className="text-[9px] opacity-70 ml-0.5">
                           {BOTTLENECK_LABELS[weeklyBottleneck as keyof typeof BOTTLENECK_LABELS] ?? ""}
                         </span>
@@ -524,22 +552,22 @@ export function FiveHourTimeline({
                         <div className="pt-1.5 border-t border-[var(--border-subtle)]">
                           <div className="grid grid-cols-3 gap-2">
                             {([
-                              ["Output", weeklyEst.outputPct, "output"],
-                              ["In+Out", weeklyEst.ioPct, "inout"],
-                              ["Total", weeklyEst.totalPct, "total"],
+                              ["Observed", weeklyInsight.observedPct, "observed"],
+                              ["Est", weeklyInsight.estimatedPct, "estimated"],
+                              ["No promo", weeklyInsight.noPromoPct, "nopromo"],
                             ] as const).map(([label, val, key]) => (
                               <div key={key} className="text-center">
                                 <div className="text-[9px] text-[var(--text-muted)] uppercase">{label}</div>
                                 <div
                                   className="text-xs font-medium tabular-nums"
                                   style={{
-                                    color: weeklyBottleneck === key
+                                    color: key === "estimated"
                                       ? weeklyColor
                                       : "var(--text-secondary)",
                                   }}
                                 >
-                                  {val.toFixed(1)}%
-                                  {weeklyBottleneck === key && " *"}
+                                  {val != null ? `${val.toFixed(1)}%` : "—"}
+                                  {key === "estimated" && " *"}
                                 </div>
                               </div>
                             ))}
@@ -579,6 +607,7 @@ export function FiveHourTimeline({
                 const winPlanTier2 = getPlanTierForDate(win.startTime, planPeriods);
                 const winPlanMult2 = (winPlanTier2 ? PLAN_TIERS[winPlanTier2].multiplier : 20) / 20;
                 const winAnchor2 = findCalibrationAnchor(calibrations, "5h", win.startTime);
+                const winSeries2 = findCalibrationSeries(calibrations, "5h", win.startTime);
                 const util = getWindowUtil(
                   win,
                   derivedLimits,
@@ -586,36 +615,40 @@ export function FiveHourTimeline({
                   solvedLimits,
                   promoPeriods,
                   winPlanMult2,
+                  winSeries2,
                   winAnchor2
                 );
+                const insight = computeLimitInsight({
+                  scope: "5h",
+                  usage: {
+                    outputTokens: win.outputTokens,
+                    inputTokens: win.inputTokens,
+                    cacheCreationTokens: win.cacheCreationTokens,
+                    cacheReadTokens: win.cacheReadTokens,
+                    totalTokens: win.totalTokens,
+                    totalCost: win.totalCost,
+                    peakStatus: win.peakStatus,
+                    peakSplit: win.peakSplit,
+                    windowStart: win.startTime,
+                  },
+                  solvedLimits: solvedLimits ?? null,
+                  derivedLimits,
+                  promos: promoPeriods,
+                  planMultiplier: winPlanMult2,
+                  calibrationSeries: winSeries2,
+                  calibrationAnchor: winAnchor2,
+                  observedPoint: winAnchor2 ?? getCalibrationForWindow(win.id, calibrations),
+                });
 
                 // Always show estimated % (reflects current tokens)
                 // actual is only for delta comparison
-                const displayPct = util?.estimated ?? null;
+                const displayPct = insight.estimatedPct ?? util?.estimated ?? null;
 
                 // Bar width = % of limit when available, else relative to max window
                 const barWidth = displayPct !== null
                   ? Math.min(displayPct, 100)
                   : (tokens / maxTokens) * 100;
-
-                // Promo multiplier for this window
-                const inPromo = promoPeriods.length > 0
-                  ? isInPromoSchedule(win.startTime, promoPeriods)
-                  : isInPromoRange(win.startTime);
-                const promoMultiplier =
-                  inPromo && win.peakStatus === "off-peak"
-                    ? 2
-                    : inPromo && win.peakStatus === "mixed"
-                    ? (win.peakSplit ? computeWeightedPromoMultiplier(win.peakSplit) : 1.5)
-                    : 1;
-                // Base % = what this would be without promo
-                const basePct =
-                  displayPct !== null && promoMultiplier > 1
-                    ? displayPct * promoMultiplier
-                    : null;
-                // Where the base limit marker sits on the bar (as % of bar width = 100%)
-                const baseMarkerPos =
-                  promoMultiplier > 1 ? (1 / promoMultiplier) * 100 : null;
+                const basePct = insight.noPromoPct;
 
                 return (
                   <div key={win.id}>
@@ -651,7 +684,7 @@ export function FiveHourTimeline({
                         {/* Bar */}
                         <div className="flex-1 h-5 bg-[var(--bg-secondary)] rounded overflow-hidden relative">
                           {/* For promo: total bar = base% width, split into effective + bonus */}
-                          {promoMultiplier > 1 && displayPct !== null ? (
+                          {basePct !== null && displayPct !== null ? (
                             <>
                               {/* Effective fill (what Claude reports) */}
                               <div
@@ -705,10 +738,10 @@ export function FiveHourTimeline({
                           <div
                             className="w-32 text-right text-[11px] tabular-nums shrink-0 font-medium leading-tight"
                             style={{ color: util.bottleneckColor }}
-                            title={`OUT ${util.outputPct.toFixed(1)}% | I/O ${util.ioPct.toFixed(1)}% | TOT ${util.totalPct.toFixed(1)}%${basePct ? ` | Base: ${basePct.toFixed(0)}%` : ""}`}
+                            title={`OUT ${util.outputPct.toFixed(1)}% | I/O ${util.ioPct.toFixed(1)}% | TOT ${util.totalPct.toFixed(1)}%${basePct ? ` | No promo: ${basePct.toFixed(0)}%` : ""}`}
                           >
                             {basePct !== null ? (
-                              /* Promo: show effective / base */
+                              /* Promo: show effective / no-promo */
                               <span>
                                 {util.isCalibrated && (
                                   <span className="text-[8px] text-[var(--accent-green)] mr-0.5">●</span>
@@ -716,7 +749,7 @@ export function FiveHourTimeline({
                                 {displayPct.toFixed(0)}%
                                 <span className="text-[var(--accent-orange)] ml-1">
                                   ({basePct.toFixed(0)}%
-                                  <span className="text-[9px]"> Bonus {promoMultiplier}x</span>)
+                                  <span className="text-[9px]"> no promo</span>)
                                 </span>
                               </span>
                             ) : (
@@ -850,7 +883,7 @@ export function FiveHourTimeline({
                                           : "var(--accent-red)",
                                     }}
                                   >
-                                    Est vs Actual: {util.delta > 0 ? "+" : ""}
+                                    Obs - Est: {util.delta > 0 ? "+" : ""}
                                     {util.delta.toFixed(1)}%
                                   </span>
                                 )}

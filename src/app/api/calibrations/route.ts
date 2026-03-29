@@ -5,7 +5,7 @@ import { CalibrationPoint, SessionOverrides, UsageEntry, FiveHourWindow, PromoPe
 import { readAllUsageData } from "@/lib/reader";
 import { readPromos } from "@/lib/promos";
 import { getActivePromoMultiplier, isInPromoRange } from "@/lib/utilization";
-import { buildFiveHourWindows, buildWeeklyBuckets, DEFAULT_WEEKLY_CONFIG } from "@/lib/limits-analyzer";
+import { buildFiveHourWindows, buildWeeklyBuckets, DEFAULT_WEEKLY_CONFIG, findWeekAnchor } from "@/lib/limits-analyzer";
 import { getModelDisplayName } from "@/lib/pricing";
 
 export const dynamic = "force-dynamic";
@@ -406,6 +406,70 @@ function snapshotWindowId(snapshot: CalibrationSnapshot): number | null {
   return "windowId" in snapshot ? snapshot.windowId : null;
 }
 
+function createCalibrationPointFromSnapshot(
+  input: {
+    reportedPct: number;
+    scope: CalibrationPoint["scope"];
+    observedAt: string;
+  },
+  snapshot: CalibrationSnapshot | null
+): CalibrationPoint {
+  const zeroTokens = { output: 0, input: 0, cacheWrite: 0, cacheRead: 0, total: 0 };
+  const zeroNormalized = {
+    output: 0,
+    input: 0,
+    cacheWrite: 0,
+    cacheRead: 0,
+    total: 0,
+    cost: 0,
+  };
+
+  let zeroWindowStart: string | null = null;
+  if (
+    !snapshot &&
+    (input.scope === "weekly-all" || input.scope === "weekly-sonnet")
+  ) {
+    const resetConfig =
+      input.scope === "weekly-sonnet"
+        ? DEFAULT_WEEKLY_CONFIG.sonnetOnly
+        : DEFAULT_WEEKLY_CONFIG.allModels;
+    zeroWindowStart = findWeekAnchor(
+      new Date(input.observedAt),
+      resetConfig
+    ).toISOString();
+  }
+
+  return snapshot
+    ? {
+        id: `cal_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: input.observedAt,
+        reportedPct: input.reportedPct,
+        scope: input.scope,
+        tokens: snapshot.tokens,
+        normalizedTokens: snapshot.normalizedTokens,
+        cost: snapshot.cost,
+        windowId: snapshotWindowId(snapshot),
+        windowStart: snapshot.windowStart,
+        peakStatus: snapshot.peakStatus as CalibrationPoint["peakStatus"],
+        modelBreakdown: snapshot.modelBreakdown,
+        agentBreakdown: snapshot.agentBreakdown,
+      }
+    : {
+        id: `cal_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: input.observedAt,
+        reportedPct: input.reportedPct,
+        scope: input.scope,
+        tokens: zeroTokens,
+        normalizedTokens: zeroNormalized,
+        cost: 0,
+        windowId: null,
+        windowStart: zeroWindowStart,
+        peakStatus: "peak" as CalibrationPoint["peakStatus"],
+        modelBreakdown: {},
+        agentBreakdown: {},
+      };
+}
+
 function applySnapshotToPoint(
   point: CalibrationPoint,
   snapshot: CalibrationSnapshot,
@@ -460,15 +524,14 @@ function needsCalibrationRepair(point: CalibrationPoint): boolean {
   return false;
 }
 
-function repairCalibrationPoints(points: CalibrationPoint[]): {
+function syncCalibrationPoints(points: CalibrationPoint[]): {
   changed: boolean;
   backfilled: number;
   normalizedBackfilled: number;
   recomputed: number;
   failed: number;
 } {
-  const needsRepair = points.some((point) => needsCalibrationRepair(point));
-  if (!needsRepair) {
+  if (points.length === 0) {
     return {
       changed: false,
       backfilled: 0,
@@ -495,14 +558,14 @@ function repairCalibrationPoints(points: CalibrationPoint[]): {
       recomputed++;
     }
 
-    if (!needsCalibrationRepair(point)) continue;
-
     const missingTokens = point.tokens == null;
     const missingNormalized = point.normalizedTokens == null;
     const snapshot = computeSnapshotForCalibration(point.scope, point.timestamp, allEntries);
 
     if (!snapshot) {
-      failed++;
+      if (needsCalibrationRepair(point)) {
+        failed++;
+      }
       continue;
     }
 
@@ -527,7 +590,7 @@ function repairCalibrationPoints(points: CalibrationPoint[]): {
 /** GET — return all calibration points */
 export async function GET() {
   const file = readCalFile();
-  const repair = repairCalibrationPoints(file.calibrations);
+  const repair = syncCalibrationPoints(file.calibrations);
   if (repair.changed) {
     writeCalFile(file);
   }
@@ -550,57 +613,55 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, count: existing.length, point: body });
     }
 
-    // Slim payload — compute snapshot server-side
-    const { reportedPct, scope, observedAt } = body as {
-      reportedPct: number;
-      scope: string;
-      observedAt: string;
-    };
+    const inputs = Array.isArray(body.points)
+      ? (body.points as Array<{
+          reportedPct: number;
+          scope: CalibrationPoint["scope"];
+          observedAt: string;
+        }>)
+      : [
+          {
+            reportedPct: body.reportedPct as number,
+            scope: body.scope as CalibrationPoint["scope"],
+            observedAt: body.observedAt as string,
+          },
+        ];
 
-    if (!reportedPct || !scope || !observedAt) {
+    if (
+      inputs.length === 0 ||
+      inputs.some(
+        (input) =>
+          input.reportedPct == null || !input.scope || !input.observedAt
+      )
+    ) {
       return NextResponse.json(
         { error: "Missing: reportedPct, scope, observedAt" },
         { status: 400 }
       );
     }
 
-    const promos = readPromos();
-    const snapshot = computeSnapshotForCalibration(
-      scope as CalibrationPoint["scope"],
-      observedAt
-    );
+    const preloadedEntries = readAllUsageData();
+    const existing = readCalibrations();
+    const created: CalibrationPoint[] = [];
 
-    if (!snapshot) {
-      return NextResponse.json(
-        { error: "No usage data found at this time for scope: " + scope },
-        { status: 404 }
+    for (const input of inputs) {
+      const snapshot = computeSnapshotForCalibration(
+        input.scope,
+        input.observedAt,
+        preloadedEntries
       );
+      const point = createCalibrationPointFromSnapshot(input, snapshot);
+      existing.push(point);
+      created.push(point);
     }
 
-    const point: CalibrationPoint = {
-      id: `cal_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: observedAt,
-      reportedPct,
-      scope: scope as CalibrationPoint["scope"],
-      tokens: snapshot.tokens,
-      normalizedTokens: snapshot.normalizedTokens,
-      cost: snapshot.cost,
-      windowId: snapshotWindowId(snapshot),
-      windowStart: snapshot.windowStart,
-      peakStatus: snapshot.peakStatus as CalibrationPoint["peakStatus"],
-      modelBreakdown: snapshot.modelBreakdown,
-      agentBreakdown: snapshot.agentBreakdown,
-    };
-
-    const existing = readCalibrations();
-    existing.push(point);
     writeCalibrations(existing);
 
     return NextResponse.json({
       ok: true,
       count: existing.length,
-      point,
-      snapshot,
+      point: created[created.length - 1] ?? null,
+      points: created,
     });
   } catch (error) {
     console.error("[calibrations] POST error:", error);
@@ -615,7 +676,7 @@ export async function POST(request: Request) {
 export async function PATCH() {
   try {
     const points = readCalibrations();
-    const repair = repairCalibrationPoints(points);
+    const repair = syncCalibrationPoints(points);
 
     if (repair.changed) {
       writeCalibrations(points);
