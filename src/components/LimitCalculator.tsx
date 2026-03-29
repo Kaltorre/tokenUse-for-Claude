@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { FiveHourWindow, WeeklyBucket, DerivedLimits, PromoPeriod } from "@/lib/types";
+import { FiveHourWindow, WeeklyBucket, DerivedLimits, PromoPeriod, DEFAULT_LIMITS_5H } from "@/lib/types";
 import { formatTokens } from "@/lib/format";
 import { saveDerivedLimits, isInPromoRange, isInPromoSchedule } from "@/lib/utilization";
 
@@ -126,9 +126,11 @@ export function LimitCalculator({
       outputLimit: derived[0].baseTokens,
       inputOutputLimit: derived[1].baseTokens,
       totalLimit: derived[2].baseTokens,
+      costLimit: derivedLimits?.costLimit ?? DEFAULT_LIMITS_5H.costLimit,
       weeklyOutputLimit: derivedLimits?.weeklyOutputLimit ?? null,
       weeklyInputOutputLimit: derivedLimits?.weeklyInputOutputLimit ?? null,
       weeklyTotalLimit: derivedLimits?.weeklyTotalLimit ?? null,
+      weeklyCostLimit: derivedLimits?.weeklyCostLimit ?? null,
       calibratedAt: new Date().toISOString(),
       calibrationPct: pct,
       promoActive: isPromo || false,

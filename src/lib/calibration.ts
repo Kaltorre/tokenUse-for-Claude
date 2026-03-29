@@ -752,7 +752,7 @@ export function estimateUtilization(
 } | null {
   if (solved.best.confidence === 0) return null;
 
-  const normalized = normalizeUsageToBase(tokens, peakStatus, windowStart, peakSplit, promos);
+  const normalized = normalizeUsageToBase({ ...tokens, cost }, peakStatus, windowStart, peakSplit, promos);
 
   // --- Calibration anchor: direct interpolation from known point ---
   // Much more accurate than regression for the same window period
@@ -823,6 +823,10 @@ export function estimateUtilization(
   if (totalPct > estimatedPct) {
     estimatedPct = totalPct;
     bottleneck = "total";
+  }
+  if (costPct > estimatedPct) {
+    estimatedPct = costPct;
+    bottleneck = "cost";
   }
 
   return {

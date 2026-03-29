@@ -10,6 +10,8 @@ import {
   PlanPeriod,
   PLAN_TIERS,
   PromoPeriod,
+  DEFAULT_LIMITS_5H,
+  DEFAULT_LIMITS_WEEKLY,
 } from "@/lib/types";
 import { formatTokens, formatCost } from "@/lib/format";
 import { getPlanTierForDate } from "@/lib/plans";
@@ -82,11 +84,6 @@ interface FiveHourAverageRow {
 }
 
 const WEEKLY_CHART_CAP_PCT = 300;
-const DEFAULT_LIMITS = {
-  outputLimit: 1_400_000,
-  inputOutputLimit: 1_500_000,
-  totalLimit: 408_500_000,
-};
 
 function getWeekLabel(iso: string): string {
   const d = new Date(iso);
@@ -113,12 +110,14 @@ function buildScaledLimits(
   planScale: number
 ): DerivedLimits {
   const base = derivedLimits ?? {
-    outputLimit: DEFAULT_LIMITS.outputLimit,
-    inputOutputLimit: DEFAULT_LIMITS.inputOutputLimit,
-    totalLimit: DEFAULT_LIMITS.totalLimit,
-    weeklyOutputLimit: null,
-    weeklyInputOutputLimit: null,
-    weeklyTotalLimit: null,
+    outputLimit: DEFAULT_LIMITS_5H.outputLimit,
+    inputOutputLimit: DEFAULT_LIMITS_5H.inputOutputLimit,
+    totalLimit: DEFAULT_LIMITS_5H.totalLimit,
+    costLimit: DEFAULT_LIMITS_5H.costLimit,
+    weeklyOutputLimit: DEFAULT_LIMITS_WEEKLY.outputLimit,
+    weeklyInputOutputLimit: DEFAULT_LIMITS_WEEKLY.inputOutputLimit,
+    weeklyTotalLimit: DEFAULT_LIMITS_WEEKLY.totalLimit,
+    weeklyCostLimit: DEFAULT_LIMITS_WEEKLY.costLimit,
     calibratedAt: "",
     calibrationPct: 0,
     promoActive: false,
@@ -129,6 +128,7 @@ function buildScaledLimits(
     outputLimit: base.outputLimit * planScale,
     inputOutputLimit: base.inputOutputLimit * planScale,
     totalLimit: base.totalLimit * planScale,
+    costLimit: base.costLimit * planScale,
     weeklyOutputLimit:
       base.weeklyOutputLimit != null ? base.weeklyOutputLimit * planScale : null,
     weeklyInputOutputLimit:
@@ -137,6 +137,8 @@ function buildScaledLimits(
         : null,
     weeklyTotalLimit:
       base.weeklyTotalLimit != null ? base.weeklyTotalLimit * planScale : null,
+    weeklyCostLimit:
+      base.weeklyCostLimit != null ? base.weeklyCostLimit * planScale : null,
   };
 }
 
@@ -187,12 +189,14 @@ export function WeeklyAggregationTab({
     const fiveH = solvedLimits?.["5h"];
 
     const base = derivedLimits ?? {
-      outputLimit: DEFAULT_LIMITS.outputLimit,
-      inputOutputLimit: DEFAULT_LIMITS.inputOutputLimit,
-      totalLimit: DEFAULT_LIMITS.totalLimit,
-      weeklyOutputLimit: null,
-      weeklyInputOutputLimit: null,
-      weeklyTotalLimit: null,
+      outputLimit: DEFAULT_LIMITS_5H.outputLimit,
+      inputOutputLimit: DEFAULT_LIMITS_5H.inputOutputLimit,
+      totalLimit: DEFAULT_LIMITS_5H.totalLimit,
+      costLimit: DEFAULT_LIMITS_5H.costLimit,
+      weeklyOutputLimit: DEFAULT_LIMITS_WEEKLY.outputLimit,
+      weeklyInputOutputLimit: DEFAULT_LIMITS_WEEKLY.inputOutputLimit,
+      weeklyTotalLimit: DEFAULT_LIMITS_WEEKLY.totalLimit,
+      weeklyCostLimit: DEFAULT_LIMITS_WEEKLY.costLimit,
       calibratedAt: "",
       calibrationPct: 0,
       promoActive: false,
@@ -205,31 +209,41 @@ export function WeeklyAggregationTab({
           ? fiveH.best.outputLimit
           : base.outputLimit > 0
           ? base.outputLimit
-          : DEFAULT_LIMITS.outputLimit,
+          : DEFAULT_LIMITS_5H.outputLimit,
       inputOutputLimit:
         fiveH && fiveH.best.confidence > 0 && fiveH.best.inputOutputLimit > 0
           ? fiveH.best.inputOutputLimit
           : base.inputOutputLimit > 0
           ? base.inputOutputLimit
-          : DEFAULT_LIMITS.inputOutputLimit,
+          : DEFAULT_LIMITS_5H.inputOutputLimit,
       totalLimit:
         fiveH && fiveH.best.confidence > 0 && fiveH.best.totalLimit > 0
           ? fiveH.best.totalLimit
           : base.totalLimit > 0
           ? base.totalLimit
-          : DEFAULT_LIMITS.totalLimit,
+          : DEFAULT_LIMITS_5H.totalLimit,
+      costLimit:
+        fiveH && fiveH.best.confidence > 0 && fiveH.best.costLimit > 0
+          ? fiveH.best.costLimit
+          : base.costLimit > 0
+          ? base.costLimit
+          : DEFAULT_LIMITS_5H.costLimit,
       weeklyOutputLimit:
         weeklyAll && weeklyAll.best.confidence > 0 && weeklyAll.best.outputLimit > 0
           ? weeklyAll.best.outputLimit
-          : base.weeklyOutputLimit,
+          : base.weeklyOutputLimit ?? DEFAULT_LIMITS_WEEKLY.outputLimit,
       weeklyInputOutputLimit:
         weeklyAll && weeklyAll.best.confidence > 0 && weeklyAll.best.inputOutputLimit > 0
           ? weeklyAll.best.inputOutputLimit
-          : base.weeklyInputOutputLimit,
+          : base.weeklyInputOutputLimit ?? DEFAULT_LIMITS_WEEKLY.inputOutputLimit,
       weeklyTotalLimit:
         weeklyAll && weeklyAll.best.confidence > 0 && weeklyAll.best.totalLimit > 0
           ? weeklyAll.best.totalLimit
-          : base.weeklyTotalLimit,
+          : base.weeklyTotalLimit ?? DEFAULT_LIMITS_WEEKLY.totalLimit,
+      weeklyCostLimit:
+        weeklyAll && weeklyAll.best.confidence > 0 && weeklyAll.best.costLimit > 0
+          ? weeklyAll.best.costLimit
+          : base.weeklyCostLimit ?? DEFAULT_LIMITS_WEEKLY.costLimit,
     };
   }, [derivedLimits, solvedLimits]);
 
@@ -243,12 +257,14 @@ export function WeeklyAggregationTab({
 
   // 5h-only limits for sessions count (weeklyX = null forces 5h mode)
   const fiveHourOnlyLimits = useMemo((): DerivedLimits => ({
-    outputLimit: effectiveLimits?.outputLimit ?? DEFAULT_LIMITS.outputLimit,
-    inputOutputLimit: effectiveLimits?.inputOutputLimit ?? DEFAULT_LIMITS.inputOutputLimit,
-    totalLimit: effectiveLimits?.totalLimit ?? DEFAULT_LIMITS.totalLimit,
+    outputLimit: effectiveLimits?.outputLimit ?? DEFAULT_LIMITS_5H.outputLimit,
+    inputOutputLimit: effectiveLimits?.inputOutputLimit ?? DEFAULT_LIMITS_5H.inputOutputLimit,
+    totalLimit: effectiveLimits?.totalLimit ?? DEFAULT_LIMITS_5H.totalLimit,
+    costLimit: effectiveLimits?.costLimit ?? DEFAULT_LIMITS_5H.costLimit,
     weeklyOutputLimit: null,
     weeklyInputOutputLimit: null,
     weeklyTotalLimit: null,
+    weeklyCostLimit: null,
     calibratedAt: effectiveLimits?.calibratedAt ?? "",
     calibrationPct: 0,
     promoActive: false,
@@ -279,6 +295,7 @@ export function WeeklyAggregationTab({
                 outputTokens: bucket.outputTokens,
                 inputTokens: bucket.inputTokens,
                 totalTokens: bucket.totalTokens,
+                totalCost: bucket.totalCost,
               },
               scaledLimits,
               bucket.peakStatus ?? "peak",
@@ -295,6 +312,7 @@ export function WeeklyAggregationTab({
                 outputTokens: bucket.outputTokens,
                 inputTokens: bucket.inputTokens,
                 totalTokens: bucket.totalTokens,
+                totalCost: bucket.totalCost,
               },
               scaled5h,
               bucket.peakStatus ?? "peak",
@@ -420,6 +438,7 @@ export function WeeklyAggregationTab({
                 outputTokens: window.outputTokens,
                 inputTokens: window.inputTokens,
                 totalTokens: window.totalTokens,
+                totalCost: window.totalCost,
               },
               scaledLimits,
               window.peakStatus,
@@ -939,7 +958,7 @@ export function WeeklyAggregationTab({
             const winChartData = sorted.map((win) => {
               const scaledLimits = buildScaledLimits(effectiveLimits, 1);
               const util = calcUtilization(
-                { outputTokens: win.outputTokens, inputTokens: win.inputTokens, totalTokens: win.totalTokens },
+                { outputTokens: win.outputTokens, inputTokens: win.inputTokens, totalTokens: win.totalTokens, totalCost: win.totalCost },
                 scaledLimits, win.peakStatus, win.startTime, "5h", win.peakSplit, promoPeriods
               );
               return {
@@ -1018,6 +1037,7 @@ export function WeeklyAggregationTab({
                           outputTokens: win.outputTokens,
                           inputTokens: win.inputTokens,
                           totalTokens: win.totalTokens,
+                          totalCost: win.totalCost,
                         },
                         scaledLimits,
                         win.peakStatus,

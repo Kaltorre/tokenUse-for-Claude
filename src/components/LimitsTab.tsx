@@ -190,7 +190,7 @@ function TokenBreakdown({
     if (solved && solved.best.confidence > 0) {
       const est = estimateUtilization(
         { output: outputTokens, input: inputTokens, cacheWrite: cacheCreationTokens, cacheRead: cacheReadTokens, total: totalTokens },
-        totalTokens * 0.001, // cost placeholder
+        totalCost ?? 0,
         solved,
         peakStatus,
         windowStart,
@@ -1169,7 +1169,8 @@ function WeeklyWindowsView({
         ? getWeeklyOverrideMatch(overrides, resolvedSonnetBucket, "sonnet")
         : null;
 
-      const planMult = weekPlanInfo?.multiplier ?? 1;
+      // Relative to calibration base (Max $200 = 20x): Max $200→1, Max $100→0.25, Pro→0.05
+      const planMult = (weekPlanInfo?.multiplier ?? 20) / 20;
 
       // Find calibration anchors for this week
       const allAnchor = findCalibrationAnchor(calibrations, "weekly-all", allBucket.weekStart);

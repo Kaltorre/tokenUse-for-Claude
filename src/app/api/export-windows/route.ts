@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import * as fs from "fs";
 import * as path from "path";
 import { readAllUsageData } from "@/lib/reader";
+
+export const dynamic = "force-dynamic";
 import {
   buildFiveHourWindows,
   buildWeeklyBuckets,

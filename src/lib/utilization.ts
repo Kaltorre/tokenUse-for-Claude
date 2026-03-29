@@ -1,4 +1,4 @@
-import { DerivedLimits, Utilization, Bottleneck, PeakStatus, FiveHourWindow, PromoPeriod } from "./types";
+import { DerivedLimits, Utilization, Bottleneck, PeakStatus, FiveHourWindow, PromoPeriod, DEFAULT_LIMITS_5H, DEFAULT_LIMITS_WEEKLY } from "./types";
 
 const STORAGE_KEY = "claude-usage-derived-limits";
 const WEEKLY_STORAGE_KEY = "claude-usage-weekly-limits";
@@ -218,6 +218,7 @@ export function calcUtilization(
     outputTokens: number;
     inputTokens: number;
     totalTokens: number;
+    totalCost?: number;
   },
   limits: DerivedLimits | null,
   peakStatus: PeakStatus,
@@ -232,11 +233,19 @@ export function calcUtilization(
   const effective = getEffectiveLimits(limits, peakStatus, windowStart, mode, peakSplit, promos);
   if (!effective) return null;
 
+  // Cost limit: prefer weekly when in weekly mode
+  let costCap =
+    mode === "weekly" && limits.weeklyCostLimit != null
+      ? limits.weeklyCostLimit
+      : limits.costLimit;
+  if (!costCap || costCap <= 0) costCap = mode === "weekly" ? DEFAULT_LIMITS_WEEKLY.costLimit : DEFAULT_LIMITS_5H.costLimit;
+
   // Scale limits by plan tier multiplier
   if (planMultiplier > 0 && planMultiplier !== 1) {
     effective.output *= planMultiplier;
     effective.inout *= planMultiplier;
     effective.total *= planMultiplier;
+    costCap *= planMultiplier;
   }
 
   const normalized = normalizeUsageToBase(
@@ -246,6 +255,7 @@ export function calcUtilization(
       cacheWrite: 0,
       cacheRead: 0,
       total: tokens.totalTokens,
+      cost: tokens.totalCost,
     },
     peakStatus,
     windowStart,
@@ -257,6 +267,9 @@ export function calcUtilization(
   const inoutPct =
     ((normalized.input + normalized.output) / effective.inout) * 100;
   const totalPct = (normalized.total / effective.total) * 100;
+  const costPct = normalized.cost > 0 && costCap > 0
+    ? (normalized.cost / costCap) * 100
+    : 0;
 
   let bottleneck: Bottleneck = "output";
   let effectivePct = outputPct;
@@ -269,11 +282,16 @@ export function calcUtilization(
     effectivePct = totalPct;
     bottleneck = "total";
   }
+  if (costPct > effectivePct) {
+    effectivePct = costPct;
+    bottleneck = "cost";
+  }
 
   return {
     outputPct: Math.round(outputPct * 10) / 10,
     inoutPct: Math.round(inoutPct * 10) / 10,
     totalPct: Math.round(totalPct * 10) / 10,
+    costPct: Math.round(costPct * 10) / 10,
     effectivePct: Math.round(effectivePct * 10) / 10,
     bottleneck,
   };
@@ -284,12 +302,14 @@ export const BOTTLENECK_LABELS: Record<Bottleneck, string> = {
   output: "OUT",
   inout: "I/O",
   total: "TOT",
+  cost: "COST",
 };
 
 export const BOTTLENECK_COLORS: Record<Bottleneck, string> = {
   output: "var(--accent-green)",
   inout: "var(--accent-blue)",
   total: "var(--accent-cyan)",
+  cost: "var(--accent-orange)",
 };
 
 // --- localStorage persistence ---

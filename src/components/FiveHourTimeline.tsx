@@ -324,7 +324,7 @@ export function FiveHourTimeline({
     group.weekWindowCount++;
 
     const winPlanTier = getPlanTierForDate(win.startTime, planPeriods);
-    const winPlanMult = winPlanTier ? PLAN_TIERS[winPlanTier].multiplier : 1;
+    const winPlanMult = (winPlanTier ? PLAN_TIERS[winPlanTier].multiplier : 20) / 20;
     const winAnchor = findCalibrationAnchor(calibrations, "5h", win.startTime);
     const util = getWindowUtil(win, derivedLimits, calibrations, solvedLimits, promoPeriods, winPlanMult, winAnchor);
     if (util) {
@@ -372,7 +372,7 @@ export function FiveHourTimeline({
 
           const weeklySolved = solvedLimits?.["weekly-all"];
           const weekPlanTier = getPlanTierForDate(group.weekStart.toISOString(), planPeriods);
-          const weekPlanMult = weekPlanTier ? PLAN_TIERS[weekPlanTier].multiplier : 1;
+          const weekPlanMult = (weekPlanTier ? PLAN_TIERS[weekPlanTier].multiplier : 20) / 20;
           const weekAnchor = findCalibrationAnchor(calibrations, "weekly-all", group.weekStart.toISOString());
           if (weeklySolved && weeklySolved.best.confidence > 0) {
             const est = estimateUtilization(
@@ -577,7 +577,7 @@ export function FiveHourTimeline({
                 const isExpanded = expanded === win.id;
 
                 const winPlanTier2 = getPlanTierForDate(win.startTime, planPeriods);
-                const winPlanMult2 = winPlanTier2 ? PLAN_TIERS[winPlanTier2].multiplier : 1;
+                const winPlanMult2 = (winPlanTier2 ? PLAN_TIERS[winPlanTier2].multiplier : 20) / 20;
                 const winAnchor2 = findCalibrationAnchor(calibrations, "5h", win.startTime);
                 const util = getWindowUtil(
                   win,

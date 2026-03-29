@@ -177,17 +177,62 @@ export interface LimitsData {
 
 // --- Derived Limits & Utilization ---
 
-export type Bottleneck = "output" | "inout" | "total";
+/**
+ * Base limits for Pro plan (tier multiplier = 1x), peak.
+ * Derived from Max $200 calibration (36 deltas, 353% 5h coverage) ÷ 20.
+ *
+ * Pro = 1x base, Max $100 = 5x, Max $200 = 20x (as advertised by Anthropic).
+ */
+const BASE_LIMITS_5H = {
+  outputLimit:      81_500,        // 1.63M / 20
+  inputOutputLimit: 94_500,        // 1.89M / 20
+  totalLimit:       24_200_000,    // 484M / 20
+  costLimit:        21.80,         // $436 / 20
+} as const;
+
+const BASE_LIMITS_WEEKLY = {
+  outputLimit:      485_000,       // 9.7M / 20
+  inputOutputLimit: 575_000,       // 11.5M / 20
+  totalLimit:       140_000_000,   // 2.8B / 20
+  costLimit:        125,           // $2500 / 20
+} as const;
+
+export interface PlanLimits {
+  outputLimit: number;
+  inputOutputLimit: number;
+  totalLimit: number;
+  costLimit: number;
+}
+
+/** Get default limits for a plan tier (scales from Max $200 base). */
+export function getDefaultLimits(tier: PlanTier, window: "5h" | "weekly"): PlanLimits {
+  const m = PLAN_TIERS[tier].multiplier;
+  const base = window === "5h" ? BASE_LIMITS_5H : BASE_LIMITS_WEEKLY;
+  return {
+    outputLimit:      Math.round(base.outputLimit * m),
+    inputOutputLimit: Math.round(base.inputOutputLimit * m),
+    totalLimit:       Math.round(base.totalLimit * m),
+    costLimit:        Math.round(base.costLimit * m * 100) / 100,
+  };
+}
+
+/** Shortcut: Max $200 defaults (multiplier 1.0). */
+export const DEFAULT_LIMITS_5H = BASE_LIMITS_5H;
+export const DEFAULT_LIMITS_WEEKLY = BASE_LIMITS_WEEKLY;
+
+export type Bottleneck = "output" | "inout" | "total" | "cost";
 
 export interface DerivedLimits {
   /** Base limits (without promo multiplier) */
-  outputLimit: number;       // e.g. 1.4M
-  inputOutputLimit: number;  // e.g. 1.5M
-  totalLimit: number;        // e.g. 408.5M
+  outputLimit: number;       // 5h: ~1.63M (Max $200 peak)
+  inputOutputLimit: number;  // 5h: ~1.89M
+  totalLimit: number;        // 5h: ~484M
+  costLimit: number;         // 5h: ~$436 (CV 0.20 — most stable)
   /** Separate weekly limits (if calibrated) */
   weeklyOutputLimit: number | null;
   weeklyInputOutputLimit: number | null;
   weeklyTotalLimit: number | null;
+  weeklyCostLimit: number | null;
   /** Calibration metadata */
   calibratedAt: string;      // ISO timestamp
   calibrationPct: number;    // % that was entered
@@ -198,6 +243,7 @@ export interface Utilization {
   outputPct: number;
   inoutPct: number;
   totalPct: number;
+  costPct: number;
   effectivePct: number;
   bottleneck: Bottleneck;
 }
@@ -329,14 +375,14 @@ export const PLAN_TIERS: Record<PlanTier, {
   label: string;
   shortLabel: string;
   color: string;
-  multiplier: number;  // relative to Max 20 = 1.0
+  multiplier: number;  // relative to Pro = 1x (Max $100 = 5x, Max $200 = 20x)
   monthlyPrice: number;
 }> = {
-  max20: { label: "Max $200", shortLabel: "M20", color: "var(--accent-purple)", multiplier: 1.0, monthlyPrice: 200 },
-  max5:  { label: "Max $100",  shortLabel: "M5",  color: "var(--accent-blue)",   multiplier: 0.25, monthlyPrice: 100 },
-  pro:   { label: "Pro",     shortLabel: "Pro", color: "var(--accent-green)",  multiplier: 0.05, monthlyPrice: 20 },
-  team:  { label: "Team",    shortLabel: "Tm",  color: "var(--accent-cyan)",   multiplier: 0.15, monthlyPrice: 30 },
-  free:  { label: "Free",    shortLabel: "F",   color: "var(--text-muted)",    multiplier: 0.01, monthlyPrice: 0 },
+  max20: { label: "Max $200", shortLabel: "M20", color: "var(--accent-purple)", multiplier: 20, monthlyPrice: 200 },
+  max5:  { label: "Max $100", shortLabel: "M5",  color: "var(--accent-blue)",   multiplier: 5, monthlyPrice: 100 },
+  pro:   { label: "Pro",      shortLabel: "Pro", color: "var(--accent-green)",  multiplier: 1, monthlyPrice: 20 },
+  team:  { label: "Team",     shortLabel: "Tm",  color: "var(--accent-cyan)",   multiplier: 3, monthlyPrice: 30 },
+  free:  { label: "Free",     shortLabel: "F",   color: "var(--text-muted)",    multiplier: 0, monthlyPrice: 0 },  // no Claude Code access
 };
 
 // --- Session Overrides ---
@@ -371,5 +417,25 @@ export interface DataSource {
 }
 
 export interface SourcesConfig {
+  primaryEnabled: boolean;
   sources: DataSource[];
+}
+
+// --- Limit Overrides ---
+
+export type LimitOverrideScope = "5h" | "weekly";
+
+/** Per-tier per-window manual limit overrides. Null fields = use calibrated/default. */
+export interface LimitOverrideEntry {
+  costLimit?: number | null;
+  outputLimit?: number | null;
+  inputOutputLimit?: number | null;
+  totalLimit?: number | null;
+}
+
+/** Key format: "{tier}:{scope}" e.g. "max20:5h", "pro:weekly" */
+export type LimitOverridesMap = Record<string, LimitOverrideEntry>;
+
+export interface LimitOverridesConfig {
+  overrides: LimitOverridesMap;
 }

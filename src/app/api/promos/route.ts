@@ -3,6 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { PromoConfig, PromoPeriod } from "@/lib/types";
 
+export const dynamic = "force-dynamic";
+
 const DATA_DIR = path.join(process.cwd(), "data");
 const PROMOS_FILE = path.join(DATA_DIR, "promos.json");
 

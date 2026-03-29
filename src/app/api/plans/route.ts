@@ -3,6 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { PlanConfig, PlanPeriod } from "@/lib/types";
 
+export const dynamic = "force-dynamic";
+
 const DATA_DIR = path.join(process.cwd(), "data");
 const PLANS_FILE = path.join(DATA_DIR, "plans.json");
 

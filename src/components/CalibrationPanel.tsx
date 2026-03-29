@@ -11,6 +11,10 @@ import {
   PLAN_TIERS,
   WeeklyBucket,
   SolvedLimits,
+  PlanLimits,
+  LimitOverridesMap,
+  LimitOverrideEntry,
+  getDefaultLimits,
 } from "@/lib/types";
 import type { AnomalyTag, AnomalyFlag } from "@/lib/types";
 import { formatTokens, formatCost } from "@/lib/format";
@@ -37,8 +41,10 @@ interface Props {
   currentWeekSonnet: WeeklyBucket | null;
   calibrations: CalibrationPoint[];
   solvedLimits: Record<CalibrationScope, SolvedLimits>;
-  onCalibrationChange: () => void;
+  onCalibrationChange: () => void | Promise<void>;
   planPeriods?: PlanPeriod[];
+  limitOverrides?: LimitOverridesMap;
+  onLimitOverridesChange?: () => void | Promise<void>;
 }
 
 function formatTime(iso: string): string {
@@ -923,15 +929,254 @@ function AnomalyFlagPanel({ point, onPatch, onClose }: AnomalyFlagPanelProps) {
   );
 }
 
+// ─── Calibrated Plan Limits Table (editable) ─────────────────────────────────
+
+const PLAN_TIER_KEYS: PlanTier[] = ["max20", "max5", "team", "pro"];
+
+function calibratedPlanLimits(
+  solved: SolvedLimits,
+  tier: PlanTier
+): PlanLimits | null {
+  if (solved.methods.length === 0 || solved.best.confidence <= 0) return null;
+  const m = PLAN_TIERS[tier].multiplier;
+  const base = 20; // Max $200 multiplier
+  return {
+    outputLimit: Math.round((solved.best.outputLimit / base) * m),
+    inputOutputLimit: Math.round((solved.best.inputOutputLimit / base) * m),
+    totalLimit: Math.round((solved.best.totalLimit / base) * m),
+    costLimit: Math.round(((solved.best.costLimit / base) * m) * 100) / 100,
+  };
+}
+
+type LimitField = "costLimit" | "outputLimit" | "inputOutputLimit" | "totalLimit";
+
+function EditableCell({
+  value,
+  overrideValue,
+  field,
+  overrideKey,
+  isCost,
+  color,
+  bold,
+  onSave,
+}: {
+  value: number;
+  overrideValue: number | null | undefined;
+  field: LimitField;
+  overrideKey: string;
+  isCost?: boolean;
+  color?: string;
+  bold?: boolean;
+  onSave: (key: string, field: LimitField, val: number | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editVal, setEditVal] = useState("");
+  const hasOverride = overrideValue != null;
+  const displayValue = hasOverride ? overrideValue : value;
+
+  const startEdit = () => {
+    setEditVal(isCost ? displayValue.toFixed(2) : String(displayValue));
+    setEditing(true);
+  };
+
+  const commitEdit = () => {
+    setEditing(false);
+    const parsed = parseFloat(editVal);
+    if (isNaN(parsed) || parsed < 0) return;
+    // If same as calculated value, remove override
+    const rounded = isCost ? Math.round(parsed * 100) / 100 : Math.round(parsed);
+    if (Math.abs(rounded - value) < 0.01) {
+      if (hasOverride) onSave(overrideKey, field, null); // remove override
+    } else {
+      onSave(overrideKey, field, rounded);
+    }
+  };
+
+  const cancelEdit = () => setEditing(false);
+
+  if (editing) {
+    return (
+      <td className="py-0.5 px-1">
+        <input
+          type="number"
+          value={editVal}
+          onChange={(e) => setEditVal(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitEdit();
+            if (e.key === "Escape") cancelEdit();
+          }}
+          autoFocus
+          step={isCost ? "0.01" : "1000"}
+          className="w-full bg-[var(--bg-primary)] border-2 border-[var(--accent-blue)] rounded px-1.5 py-1 text-[11px] text-right tabular-nums text-[var(--text-primary)] focus:outline-none"
+        />
+      </td>
+    );
+  }
+
+  return (
+    <td
+      className={`py-1.5 px-2 text-right tabular-nums cursor-pointer group/cell transition-colors ${bold ? "font-semibold" : ""}`}
+      style={{ color: color ?? "var(--text-secondary)" }}
+      onClick={startEdit}
+      title="Kliknij aby edytować"
+    >
+      <span className="inline-flex items-center gap-1 rounded px-1 -mx-1 py-0.5 group-hover/cell:bg-[var(--accent-blue)]/10 transition-colors">
+        <span className={hasOverride ? "border-b-2 border-dashed border-[var(--accent-blue)]" : ""}>
+          {isCost ? formatCost(displayValue) : formatTokens(displayValue)}
+        </span>
+        <svg className="w-3 h-3 opacity-0 group-hover/cell:opacity-60 transition-opacity shrink-0" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M12.1 1.3a1 1 0 0 1 1.4 0l1.2 1.2a1 1 0 0 1 0 1.4l-8.5 8.5-3.2.8.8-3.2 8.3-8.7zm.7.7L4.5 10.3l-.4 1.6 1.6-.4L14 3.2 12.8 2z"/>
+        </svg>
+      </span>
+    </td>
+  );
+}
+
+function CalibratedPlanLimitsTable({
+  solvedLimits,
+  overrides,
+  onOverrideChange,
+}: {
+  solvedLimits: Record<CalibrationScope, SolvedLimits>;
+  overrides: LimitOverridesMap;
+  onOverrideChange: () => void;
+}) {
+  const [useCalibrated, setUseCalibrated] = useState(true);
+
+  const scopes: { key: string; label: string; scopeKey: CalibrationScope; defaultWindow: "5h" | "weekly" }[] = [
+    { key: "5h", label: "5-Hour Window", scopeKey: "5h", defaultWindow: "5h" },
+    { key: "weekly", label: "7-Day (Weekly)", scopeKey: "weekly-all", defaultWindow: "weekly" },
+  ];
+
+  const saveOverride = async (overrideKey: string, field: LimitField, val: number | null) => {
+    if (val === null) {
+      await fetch(`/api/limit-overrides?key=${encodeURIComponent(overrideKey)}&field=${field}`, { method: "DELETE" });
+    } else {
+      await fetch("/api/limit-overrides", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: overrideKey, entry: { [field]: val } }),
+      });
+    }
+    onOverrideChange();
+  };
+
+  // Check if any scope has calibration data
+  const hasAnyCalibration = scopes.some(({ scopeKey }) => {
+    const s = solvedLimits[scopeKey];
+    return s.methods.length > 0 && s.best.confidence > 0;
+  });
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] text-[var(--text-muted)]">
+          Limity per plan. Kliknij wartość aby edytować.
+          <span className="border-b border-dashed border-[var(--text-muted)] ml-1">Podkreślone</span> = ręcznie nadpisane.
+        </p>
+        {hasAnyCalibration && (
+          <button
+            onClick={() => setUseCalibrated((v) => !v)}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all border ${
+              useCalibrated
+                ? "border-[var(--accent-green)] text-[var(--accent-green)] bg-[var(--accent-green)]/10"
+                : "border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+            }`}
+          >
+            <span className={`w-2 h-2 rounded-full transition-colors ${useCalibrated ? "bg-[var(--accent-green)]" : "bg-[var(--text-muted)]"}`} />
+            {useCalibrated ? "Kalibracja ON" : "Kalibracja OFF"}
+          </button>
+        )}
+      </div>
+
+      {scopes.map(({ key, label, scopeKey, defaultWindow }) => {
+        const solved = solvedLimits[scopeKey];
+        const hasData = useCalibrated && solved.methods.length > 0 && solved.best.confidence > 0;
+
+        return (
+          <div key={key}>
+            <div className="flex items-center gap-2 mb-2">
+              <h4 className="text-xs font-semibold text-[var(--text-secondary)]">
+                {label}
+              </h4>
+              {hasData && (
+                <ConfidenceBadge confidence={solved.best.confidence} />
+              )}
+              {!hasData && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-muted)] font-medium">
+                  default
+                </span>
+              )}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="border-b border-[var(--border-subtle)]">
+                    <th className="text-left py-1.5 px-2 text-[var(--text-muted)] font-medium">Plan</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Mult</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--accent-orange)] font-medium">Cost Limit</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Output</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">In+Out</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {PLAN_TIER_KEYS.map((tier) => {
+                    const info = PLAN_TIERS[tier];
+                    const lim = hasData
+                      ? calibratedPlanLimits(solved, tier)
+                      : getDefaultLimits(tier, defaultWindow);
+                    if (!lim) return null;
+                    const oKey = `${tier}:${key}`;
+                    const ov = overrides[oKey];
+                    return (
+                      <tr key={tier} className="border-b border-[var(--border-subtle)]">
+                        <td className="py-1.5 px-2 font-medium" style={{ color: info.color }}>
+                          {info.label}
+                          <span className="text-[var(--text-muted)] font-normal ml-1">
+                            ${info.monthlyPrice}/mo
+                          </span>
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                          {info.multiplier}x
+                        </td>
+                        <EditableCell value={lim.costLimit} overrideValue={ov?.costLimit} field="costLimit" overrideKey={oKey} isCost color="var(--accent-orange)" bold onSave={saveOverride} />
+                        <EditableCell value={lim.outputLimit} overrideValue={ov?.outputLimit} field="outputLimit" overrideKey={oKey} onSave={saveOverride} />
+                        <EditableCell value={lim.inputOutputLimit} overrideValue={ov?.inputOutputLimit} field="inputOutputLimit" overrideKey={oKey} onSave={saveOverride} />
+                        <EditableCell value={lim.totalLimit} overrideValue={ov?.totalLimit} field="totalLimit" overrideKey={oKey} onSave={saveOverride} />
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+
+      <p className="text-[9px] text-[var(--text-muted)]">
+        {useCalibrated && hasAnyCalibration
+          ? "Baza: solved limits z kalibracji (Max $200), skalowane mnożnikiem planu."
+          : "Domyślne limity (hardcoded base), skalowane mnożnikiem planu."
+        }
+        {" "}Podczas promo 2x off-peak limity się podwajają.
+      </p>
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type CalSubTab = "points" | "estimates";
+type CalSubTab = "points" | "estimates" | "limits";
 
 export function CalibrationPanel({
   calibrations,
   solvedLimits,
   onCalibrationChange,
   planPeriods = [],
+  limitOverrides = {},
+  onLimitOverridesChange,
 }: Props) {
   const [subTab, setSubTab] = useState<CalSubTab>("points");
   const [showDialog, setShowDialog] = useState(false);
@@ -956,7 +1201,7 @@ export function CalibrationPanel({
         body: JSON.stringify({ reportedPct: pct, scope, observedAt: isoTime }),
       });
     }
-    onCalibrationChange();
+    await onCalibrationChange();
   };
 
   const handleEditSave = async (
@@ -989,7 +1234,7 @@ export function CalibrationPanel({
         });
       }
     }
-    onCalibrationChange();
+    await onCalibrationChange();
   };
 
   const patchAnomalyFlag = async (pointId: string, flag: AnomalyFlag) => {
@@ -998,7 +1243,7 @@ export function CalibrationPanel({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: pointId, anomalyFlag: flag }),
     });
-    onCalibrationChange();
+    await onCalibrationChange();
   };
 
   const handleRemoveGroup = async (group: ReturnType<typeof groupByObservation>[0]) => {
@@ -1006,7 +1251,7 @@ export function CalibrationPanel({
     for (const id of ids) {
       await fetch(`/api/calibrations?id=${id}`, { method: "DELETE" });
     }
-    onCalibrationChange();
+    await onCalibrationChange();
   };
 
   const groups = groupByObservation(calibrations);
@@ -1022,7 +1267,7 @@ export function CalibrationPanel({
       {/* Sub-tab nav + Add button */}
       <div className="flex items-center justify-between border-b border-[var(--border-subtle)] pb-0">
         <div className="flex gap-1">
-          {(["points", "estimates"] as CalSubTab[]).map((t) => (
+          {(["points", "estimates", "limits"] as CalSubTab[]).map((t) => (
             <button
               key={t}
               onClick={() => setSubTab(t)}
@@ -1032,7 +1277,7 @@ export function CalibrationPanel({
                   : "border-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
               }`}
             >
-              {t === "points" ? "Points" : "Estimates"}
+              {t === "points" ? "Points" : t === "estimates" ? "Estimates" : "Limits"}
             </button>
           ))}
         </div>
@@ -1072,6 +1317,17 @@ export function CalibrationPanel({
           <PerPercentAnalyticsPanel
             calibrations={calibrations}
             planPeriods={planPeriods}
+          />
+        </div>
+      )}
+
+      {/* Limits tab — calibrated plan limits */}
+      {subTab === "limits" && (
+        <div className="card p-5">
+          <CalibratedPlanLimitsTable
+            solvedLimits={solvedLimits}
+            overrides={limitOverrides}
+            onOverrideChange={onLimitOverridesChange ?? (() => {})}
           />
         </div>
       )}

@@ -56,19 +56,21 @@ const FAMILY_PRICING: Record<string, ModelPricing> = {
   haiku:  VERSION_PRICING["haiku-4-5"],
 };
 
-function getModelPricing(model: string): ModelPricing {
+export function getModelPricing(model: string): ModelPricing {
   const lower = model.toLowerCase();
 
-  // Try exact version match first
-  for (const [key, pricing] of Object.entries(VERSION_PRICING)) {
-    if (lower.includes(key.replace(/-/g, "[-_ ]?"))) {
-      return pricing;
+  // Try exact version match first (longest key first to avoid partial matches)
+  const sortedKeys = Object.keys(VERSION_PRICING).sort((a, b) => b.length - a.length);
+  for (const key of sortedKeys) {
+    const pattern = new RegExp(key.replace(/-/g, "[- _.]*"));
+    if (pattern.test(lower)) {
+      return VERSION_PRICING[key];
     }
   }
 
   // Try extracting family + version from model string
-  // e.g. "claude-opus-4-6" -> "opus-4-6"
-  const match = lower.match(/(opus|sonnet|haiku)[- _]?(\d+)[- _]?(\d+)?/);
+  // e.g. "claude-opus-4-6" -> "opus-4-6", "Opus 4.6" -> "opus-4-6"
+  const match = lower.match(/(opus|sonnet|haiku)[- _.]*(\d+)[- _.]*(\d+)?/);
   if (match) {
     const family = match[1];
     const major = match[2];

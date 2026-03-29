@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { ProjectStats } from "@/lib/types";
 import { formatTokens, formatCost, formatDate, shortProject } from "@/lib/format";
 
@@ -12,7 +12,6 @@ interface Props {
 export function ProjectBreakdown({ projects, full }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const list = full ? projects : projects.slice(0, 10);
-  const maxTokens = Math.max(...list.map((p) => p.totalTokens), 1);
 
   return (
     <div className="card p-5">
@@ -20,144 +19,140 @@ export function ProjectBreakdown({ projects, full }: Props) {
         {full ? `All Projects (${projects.length})` : "Top Projects"}
       </h3>
 
-      {/* Column headers */}
-      <div className="flex items-center justify-between px-3 pb-1.5 border-b border-[var(--border-subtle)] mb-1">
-        <span className="text-xs text-[var(--text-muted)] opacity-60">project</span>
-        <div className="flex items-center gap-3 shrink-0 text-[10px] text-[var(--text-muted)] opacity-60">
-          <span className="w-[52px] text-right">input</span>
-          <span className="w-[52px] text-right">output</span>
-          <span className="w-[52px] text-right">cw</span>
-          <span className="w-[52px] text-right">cr</span>
-          <span className="w-[56px] text-right">cost</span>
-          <span className="w-[36px] text-right">ses</span>
-        </div>
-      </div>
+      {list.length === 0 ? (
+        <p className="text-sm text-[var(--text-muted)]">No project data.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-[var(--border-subtle)]">
+                <th className="text-left py-2 px-2 text-[var(--text-muted)] font-medium">Project</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">Cost</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">Tokens</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">In</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">Out</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">CacheW</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">CacheR</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">Msgs</th>
+                <th className="text-right py-2 px-2 text-[var(--text-muted)] font-medium">Ses</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((p, idx) => {
+                const isExpanded = expanded === p.project;
+                const modelEntries = Object.entries(p.models).sort(
+                  ([, a], [, b]) => b.totalCost - a.totalCost
+                );
 
-      <div className="space-y-0.5">
-        {list.map((p) => {
-          const pct = (p.totalTokens / maxTokens) * 100;
-          const isExpanded = expanded === p.project;
-          const modelEntries = Object.entries(p.models).sort(
-            ([, a], [, b]) => b.totalCost - a.totalCost
-          );
+                return (
+                  <Fragment key={p.project}>
+                    <tr
+                      onClick={() =>
+                        setExpanded(isExpanded ? null : p.project)
+                      }
+                      className={`border-b border-[var(--border-subtle)] cursor-pointer hover:bg-[var(--bg-secondary)] transition-colors ${
+                        idx === 0 ? "bg-[var(--bg-secondary)]" : ""
+                      }`}
+                    >
+                      <td className="py-2 px-2 text-[var(--text-secondary)] font-medium">
+                        <span className="truncate block max-w-[220px]" title={p.project}>
+                          {full ? p.project : shortProject(p.project)}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--accent-green)]">
+                        {formatCost(p.totalCost)}
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--accent-blue)]">
+                        {formatTokens(p.totalTokens)}
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                        {formatTokens(p.inputTokens)}
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                        {formatTokens(p.outputTokens)}
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                        {formatTokens(p.cacheCreationTokens)}
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                        {formatTokens(p.cacheReadTokens)}
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                        {p.messageCount}
+                      </td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                        {p.sessionCount}
+                      </td>
+                    </tr>
 
-          return (
-            <div key={p.project}>
-              <button
-                onClick={() =>
-                  setExpanded(isExpanded ? null : p.project)
-                }
-                className="w-full text-left px-3 py-2.5 rounded-lg hover:bg-[var(--bg-secondary)] transition-colors"
-              >
-                <div className="flex items-center justify-between gap-2 mb-1.5">
-                  <span className="text-xs text-[var(--text-primary)] truncate font-medium">
-                    {full ? p.project : shortProject(p.project)}
-                  </span>
-                  <div className="flex items-center gap-3 shrink-0 text-xs">
-                    <span className="w-[52px] text-right font-mono text-[var(--accent-blue)]">
-                      {formatTokens(p.inputTokens)}
-                    </span>
-                    <span className="w-[52px] text-right font-mono text-[var(--accent-green)]">
-                      {formatTokens(p.outputTokens)}
-                    </span>
-                    <span className="w-[52px] text-right font-mono text-[var(--accent-purple)]">
-                      {formatTokens(p.cacheCreationTokens)}
-                    </span>
-                    <span className="w-[52px] text-right font-mono text-[var(--accent-cyan)]">
-                      {formatTokens(p.cacheReadTokens)}
-                    </span>
-                    <span className="w-[56px] text-right font-mono text-[var(--accent-orange)]">
-                      {formatCost(p.totalCost)}
-                    </span>
-                    <span className="w-[36px] text-right text-[var(--text-muted)]">
-                      {p.sessionCount}
-                    </span>
-                  </div>
-                </div>
-                <div className="h-1 bg-[var(--bg-secondary)] rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-[var(--accent-blue)] to-[var(--accent-purple)] rounded-full transition-all"
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-                {full && !isExpanded && (
-                  <div className="flex gap-4 mt-1 text-xs text-[var(--text-muted)]">
-                    <span>{p.messageCount} messages</span>
-                    <span>Last: {formatDate(p.lastUsed)}</span>
-                  </div>
-                )}
-              </button>
-
-              {isExpanded && (
-                <div className="ml-4 mt-1 mb-3 px-3 py-2.5 rounded-lg bg-[var(--bg-secondary)] animate-fade-in">
-                  {/* Project meta */}
-                  <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)] mb-2.5">
-                    <span>
-                      {p.messageCount} msgs · {p.sessionCount} sessions · Total: {formatTokens(p.totalTokens)}
-                    </span>
-                    <span>Last: {formatDate(p.lastUsed)}</span>
-                  </div>
-
-                  {/* Per-model breakdown header */}
-                  <div className="flex items-center justify-between px-2 pb-1 border-b border-[var(--border-subtle)] mb-1">
-                    <span className="text-[10px] text-[var(--text-muted)] opacity-60">model</span>
-                    <div className="flex items-center gap-2 shrink-0 text-[10px] text-[var(--text-muted)] opacity-60">
-                      <span className="w-[48px] text-right">input</span>
-                      <span className="w-[48px] text-right">output</span>
-                      <span className="w-[48px] text-right">cw</span>
-                      <span className="w-[48px] text-right">cr</span>
-                      <span className="w-[52px] text-right">cost</span>
-                      <span className="w-[32px] text-right">msg</span>
-                    </div>
-                  </div>
-
-                  {/* Per-model rows */}
-                  <div className="space-y-0.5">
-                    {modelEntries.map(([model, m]) => {
-                      const modelPct = p.totalTokens > 0 ? (m.totalTokens / p.totalTokens) * 100 : 0;
-                      return (
-                        <div key={model} className="px-2 py-1.5 rounded hover:bg-[var(--bg-primary)] transition-colors">
-                          <div className="flex items-center justify-between gap-2 mb-1">
-                            <span className="text-[11px] text-[var(--text-secondary)] font-medium truncate">
-                              {model}
-                            </span>
-                            <div className="flex items-center gap-2 shrink-0 text-[11px]">
-                              <span className="w-[48px] text-right font-mono text-[var(--accent-blue)]">
-                                {formatTokens(m.inputTokens)}
+                    {isExpanded && (
+                      <tr key={`${p.project}-detail`}>
+                        <td colSpan={9} className="p-0">
+                          <div className="mx-2 my-1 px-3 py-2.5 rounded-lg bg-[var(--bg-secondary)] animate-fade-in">
+                            {/* Project meta */}
+                            <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)] mb-2.5">
+                              <span>
+                                {p.messageCount} msgs · {p.sessionCount} sessions · Total: {formatTokens(p.totalTokens)}
                               </span>
-                              <span className="w-[48px] text-right font-mono text-[var(--accent-green)]">
-                                {formatTokens(m.outputTokens)}
-                              </span>
-                              <span className="w-[48px] text-right font-mono text-[var(--accent-purple)]">
-                                {formatTokens(m.cacheCreationTokens)}
-                              </span>
-                              <span className="w-[48px] text-right font-mono text-[var(--accent-cyan)]">
-                                {formatTokens(m.cacheReadTokens)}
-                              </span>
-                              <span className="w-[52px] text-right font-mono text-[var(--accent-orange)]">
-                                {formatCost(m.totalCost)}
-                              </span>
-                              <span className="w-[32px] text-right text-[var(--text-muted)]">
-                                {m.messageCount}
-                              </span>
+                              <span>Last: {formatDate(p.lastUsed)}</span>
                             </div>
+
+                            {/* Per-model breakdown */}
+                            <table className="w-full text-[11px]">
+                              <thead>
+                                <tr className="border-b border-[var(--border-subtle)]">
+                                  <th className="text-left py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">model</th>
+                                  <th className="text-right py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">cost</th>
+                                  <th className="text-right py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">tokens</th>
+                                  <th className="text-right py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">in</th>
+                                  <th className="text-right py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">out</th>
+                                  <th className="text-right py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">cw</th>
+                                  <th className="text-right py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">cr</th>
+                                  <th className="text-right py-1 px-2 text-[10px] text-[var(--text-muted)] font-medium opacity-60">msg</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {modelEntries.map(([model, m]) => (
+                                  <tr key={model} className="hover:bg-[var(--bg-primary)] transition-colors">
+                                    <td className="py-1 px-2 text-[var(--text-secondary)] font-medium truncate max-w-[180px]">
+                                      {model}
+                                    </td>
+                                    <td className="py-1 px-2 text-right tabular-nums text-[var(--accent-green)]">
+                                      {formatCost(m.totalCost)}
+                                    </td>
+                                    <td className="py-1 px-2 text-right tabular-nums text-[var(--accent-blue)]">
+                                      {formatTokens(m.totalTokens)}
+                                    </td>
+                                    <td className="py-1 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                                      {formatTokens(m.inputTokens)}
+                                    </td>
+                                    <td className="py-1 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                                      {formatTokens(m.outputTokens)}
+                                    </td>
+                                    <td className="py-1 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                                      {formatTokens(m.cacheCreationTokens)}
+                                    </td>
+                                    <td className="py-1 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                                      {formatTokens(m.cacheReadTokens)}
+                                    </td>
+                                    <td className="py-1 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                                      {m.messageCount}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
                           </div>
-                          <div className="h-0.5 bg-[var(--bg-secondary)] rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-gradient-to-r from-[var(--accent-green)] to-[var(--accent-cyan)] rounded-full"
-                              style={{ width: `${modelPct}%` }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

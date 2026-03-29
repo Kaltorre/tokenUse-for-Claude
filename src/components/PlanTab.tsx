@@ -12,6 +12,7 @@ import {
   WeeklyBucket,
   LimitsData,
   PromoPeriod,
+  getDefaultLimits,
 } from "@/lib/types";
 import { formatTokens, formatCost, formatDate } from "@/lib/format";
 import { estimateUtilization, findCalibrationAnchor } from "@/lib/calibration";
@@ -347,7 +348,7 @@ function WeeklyPlanChart({ weeklyAll, periods, solvedLimits, promoPeriods = [], 
 
     let estimatedPct: number | null = null;
     const solved = solvedLimits["weekly-all"];
-    const weekPlanMult = tierInfo?.multiplier ?? 1;
+    const weekPlanMult = (tierInfo?.multiplier ?? 20) / 20;
     const weekAnchor = findCalibrationAnchor(calibrations, "weekly-all", bucket.weekStart);
     if (solved && solved.best.confidence > 0) {
       const est = estimateUtilization(
@@ -459,12 +460,119 @@ function WeeklyPlanChart({ weeklyAll, periods, solvedLimits, promoPeriods = [], 
 
 // ─── Main PlanTab Component ──────────────────────────────────────────────────
 
-type PlanSubTab = "periods" | "weekly";
+type PlanSubTab = "periods" | "weekly" | "limits";
 
 const SUB_TABS: { key: PlanSubTab; label: string }[] = [
   { key: "periods", label: "Periods" },
   { key: "weekly", label: "Weekly" },
+  { key: "limits", label: "Limits" },
 ];
+
+// ─── Plan Limits Reference Table ────────────────────────────────────────────
+
+const PLAN_TIER_KEYS: PlanTier[] = ["max20", "max5", "team", "pro"];
+
+function PlanLimitsTable({ solvedLimits }: { solvedLimits: Record<CalibrationScope, SolvedLimits> }) {
+  const scopes: { window: "5h" | "weekly"; label: string; scopeKey: CalibrationScope }[] = [
+    { window: "5h", label: "5-Hour Window", scopeKey: "5h" },
+    { window: "weekly", label: "7-Day (Weekly)", scopeKey: "weekly-all" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-[10px] text-[var(--text-muted)]">
+          Limity per plan oparte na kalibracji (solved) lub domyślne (fallback). Skalowane przez mnożnik planu.
+          Koszt (CV 0.20) to najstabilniejszy predyktor limitu.
+        </p>
+      </div>
+
+      {scopes.map(({ window, label, scopeKey }) => {
+        const solved = solvedLimits[scopeKey];
+        const hasCalibrated = solved.methods.length > 0 && solved.best.confidence > 0;
+
+        return (
+          <div key={window}>
+            <div className="flex items-center gap-2 mb-2">
+              <h4 className="text-xs font-semibold text-[var(--text-secondary)]">
+                {label}
+              </h4>
+              <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                hasCalibrated
+                  ? "bg-[var(--accent-green)]/15 text-[var(--accent-green)]"
+                  : "bg-[var(--bg-secondary)] text-[var(--text-muted)]"
+              }`}>
+                {hasCalibrated ? "calibrated" : "default"}
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="border-b border-[var(--border-subtle)]">
+                    <th className="text-left py-1.5 px-2 text-[var(--text-muted)] font-medium">Plan</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Mult</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--accent-orange)] font-medium">Cost Limit</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Output</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">In+Out</th>
+                    <th className="text-right py-1.5 px-2 text-[var(--text-muted)] font-medium">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {PLAN_TIER_KEYS.map((tier) => {
+                    const info = PLAN_TIERS[tier];
+                    let lim: { costLimit: number; outputLimit: number; inputOutputLimit: number; totalLimit: number };
+                    if (hasCalibrated) {
+                      const m = info.multiplier;
+                      const base = 20; // Max $200 multiplier
+                      lim = {
+                        outputLimit: Math.round((solved.best.outputLimit / base) * m),
+                        inputOutputLimit: Math.round((solved.best.inputOutputLimit / base) * m),
+                        totalLimit: Math.round((solved.best.totalLimit / base) * m),
+                        costLimit: Math.round(((solved.best.costLimit / base) * m) * 100) / 100,
+                      };
+                    } else {
+                      lim = getDefaultLimits(tier, window);
+                    }
+                    return (
+                      <tr key={tier} className="border-b border-[var(--border-subtle)]">
+                        <td className="py-1.5 px-2 font-medium" style={{ color: info.color }}>
+                          {info.label}
+                          <span className="text-[var(--text-muted)] font-normal ml-1">
+                            ${info.monthlyPrice}/mo
+                          </span>
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-[var(--text-muted)]">
+                          {info.multiplier}x
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums font-semibold text-[var(--accent-orange)]">
+                          {formatCost(lim.costLimit)}
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-[var(--text-secondary)]">
+                          {formatTokens(lim.outputLimit)}
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-[var(--text-secondary)]">
+                          {formatTokens(lim.inputOutputLimit)}
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-[var(--text-secondary)]">
+                          {formatTokens(lim.totalLimit)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+
+      <p className="text-[9px] text-[var(--text-muted)]">
+        Baza: solved limits z kalibracji (Max $200), skalowane mnożnikiem planu.
+        Podczas promo 2x off-peak limity się podwajają.
+      </p>
+    </div>
+  );
+}
 
 interface PlanTabProps {
   periods: PlanPeriod[];
@@ -548,6 +656,10 @@ export function PlanTab({
             promoPeriods={promoPeriods}
             calibrations={calibrations}
           />
+        )}
+
+        {subTab === "limits" && (
+          <PlanLimitsTable solvedLimits={solvedLimits} />
         )}
 
       </div>

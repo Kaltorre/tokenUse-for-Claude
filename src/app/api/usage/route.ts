@@ -4,7 +4,8 @@ import * as path from "path";
 import * as os from "os";
 import { analyzeUsage } from "@/lib/analyzer";
 import { readAllUsageData } from "@/lib/reader";
-import { UsageData, PromoPeriod } from "@/lib/types";
+import { readPromos } from "@/lib/promos";
+import { UsageData } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -15,15 +16,6 @@ const RAW_CACHE = path.join(CACHE_DIR, "usage-cache.json");
 const PROMOS_FILE = path.join(process.cwd(), "data", "promos.json");
 
 let memCache: { data: UsageData; time: number } | null = null;
-
-function readPromos(): PromoPeriod[] {
-  try {
-    if (!fs.existsSync(PROMOS_FILE)) return [];
-    return (JSON.parse(fs.readFileSync(PROMOS_FILE, "utf-8")) as { periods: PromoPeriod[] }).periods ?? [];
-  } catch {
-    return [];
-  }
-}
 
 function loadDiskCache(): UsageData | null {
   try {

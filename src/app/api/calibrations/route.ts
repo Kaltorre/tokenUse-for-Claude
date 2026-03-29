@@ -3,23 +3,15 @@ import * as fs from "fs";
 import * as path from "path";
 import { CalibrationPoint, SessionOverrides, UsageEntry, FiveHourWindow, PromoPeriod, ModelTokenBreakdown } from "@/lib/types";
 import { readAllUsageData } from "@/lib/reader";
+import { readPromos } from "@/lib/promos";
 import { getActivePromoMultiplier, isInPromoRange } from "@/lib/utilization";
 import { buildFiveHourWindows, buildWeeklyBuckets, DEFAULT_WEEKLY_CONFIG } from "@/lib/limits-analyzer";
 import { getModelDisplayName } from "@/lib/pricing";
 
+export const dynamic = "force-dynamic";
+
 const DATA_DIR = path.join(process.cwd(), "data");
 const CAL_FILE = path.join(DATA_DIR, "calibrations.json");
-const PROMOS_FILE = path.join(DATA_DIR, "promos.json");
-
-function readPromos(): PromoPeriod[] {
-  try {
-    if (!fs.existsSync(PROMOS_FILE)) return [];
-    const raw = fs.readFileSync(PROMOS_FILE, "utf-8");
-    return (JSON.parse(raw) as { periods: PromoPeriod[] }).periods ?? [];
-  } catch {
-    return [];
-  }
-}
 
 function ensureDir() {
   if (!fs.existsSync(DATA_DIR)) {

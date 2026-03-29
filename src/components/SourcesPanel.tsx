@@ -110,6 +110,7 @@ function SourceDialog({ initial, onSave, onClose }: SourceDialogProps) {
 
 export function SourcesPanel() {
   const [sources, setSources] = useState<DataSource[]>([]);
+  const [primaryEnabled, setPrimaryEnabled] = useState(true);
   const [showDialog, setShowDialog] = useState(false);
   const [editingSource, setEditingSource] = useState<DataSource | null>(null);
 
@@ -119,6 +120,7 @@ export function SourcesPanel() {
       if (res.ok) {
         const config = await res.json();
         setSources(config.sources ?? []);
+        setPrimaryEnabled(config.primaryEnabled !== false);
       }
     } catch (e) {
       console.error("Failed to load sources:", e);
@@ -146,7 +148,7 @@ export function SourcesPanel() {
 
   const handleDelete = async (id: string) => {
     await fetch(`/api/sources?id=${id}`, { method: "DELETE" });
-    fetchSources();
+    await fetchSources();
   };
 
   const handleToggle = async (source: DataSource) => {
@@ -155,7 +157,24 @@ export function SourcesPanel() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...source, enabled: !source.enabled }),
     });
-    fetchSources();
+    await fetchSources();
+  };
+
+  const handleTogglePrimary = async () => {
+    await fetch("/api/sources", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ primaryEnabled: !primaryEnabled }),
+    });
+    await fetchSources();
+  };
+
+  const openFolder = (folderPath?: string) => {
+    fetch("/api/open-data-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: folderPath ?? "" }),
+    });
   };
 
   return (
@@ -179,18 +198,43 @@ export function SourcesPanel() {
         </button>
       </div>
 
-      {/* Default source info */}
-      <div className="card p-4">
+      {/* Primary source */}
+      <div className="card p-4" style={{ opacity: primaryEnabled ? 1 : 0.5 }}>
         <div className="flex items-center gap-3">
-          <span className="w-2 h-2 rounded-full bg-[var(--accent-green)] shrink-0" />
+          <button
+            onClick={handleTogglePrimary}
+            className={`w-8 h-4 rounded-full relative transition-colors shrink-0 ${
+              primaryEnabled ? "bg-[var(--accent-blue)]" : "bg-[var(--bg-secondary)] border border-[var(--border-subtle)]"
+            }`}
+            title={primaryEnabled ? "Disable primary source" : "Enable primary source"}
+          >
+            <span
+              className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${
+                primaryEnabled ? "left-4" : "left-0.5"
+              }`}
+            />
+          </button>
           <div className="min-w-0 flex-1">
             <span className="text-sm font-medium text-[var(--text-primary)]">Local (default)</span>
             <p className="text-xs text-[var(--text-muted)] font-mono truncate mt-0.5">
               ~/.claude/projects
             </p>
           </div>
-          <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--accent-green)]/20 text-[var(--accent-green)] font-medium shrink-0">
-            always on
+          <button
+            onClick={() => openFolder()}
+            className="px-2 py-1 rounded text-[10px] text-[var(--text-muted)] hover:text-[var(--accent-blue)] hover:bg-[var(--bg-secondary)] transition-colors shrink-0"
+            title="Open folder"
+          >
+            Open
+          </button>
+          <span
+            className={`text-[9px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
+              primaryEnabled
+                ? "bg-[var(--accent-green)]/20 text-[var(--accent-green)]"
+                : "bg-[var(--text-muted)]/20 text-[var(--text-muted)]"
+            }`}
+          >
+            {primaryEnabled ? "on" : "off"}
           </span>
         </div>
       </div>
@@ -257,6 +301,13 @@ export function SourcesPanel() {
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0">
                   <button
+                    onClick={() => openFolder(s.path)}
+                    className="px-2 py-1 rounded text-[10px] text-[var(--text-muted)] hover:text-[var(--accent-blue)] hover:bg-[var(--bg-secondary)] transition-colors"
+                    title="Open folder"
+                  >
+                    Open
+                  </button>
+                  <button
                     onClick={() => {
                       setEditingSource(s);
                       setShowDialog(true);
@@ -293,11 +344,11 @@ export function SourcesPanel() {
       {/* Info note */}
       <div className="text-xs text-[var(--text-muted)] px-1 space-y-1">
         <p>
-          Point each source to a .claude/projects directory (or any folder with .jsonl session files).
+          Toggle any source on/off, including the default local source.
           Projects from additional sources are prefixed with [Label] in the dashboard.
         </p>
         <p>
-          Use this to aggregate sessions from backups or other computers. Reload the page after adding sources.
+          Use this to aggregate sessions from backups or other computers. Reload the page after changing sources.
         </p>
       </div>
     </div>

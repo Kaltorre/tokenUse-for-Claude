@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { UsageEntry, TokenUsage, DataSource } from "./types";
+import { UsageEntry, TokenUsage, DataSource, SourcesConfig } from "./types";
 import { calculateCost } from "./pricing";
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude", "projects");
@@ -24,22 +24,26 @@ function ensureCacheDir() {
   }
 }
 
-export function loadSources(): DataSource[] {
+export function loadSourcesConfig(): SourcesConfig {
   try {
     if (fs.existsSync(SOURCES_FILE)) {
       const raw = JSON.parse(fs.readFileSync(SOURCES_FILE, "utf-8"));
-      return (raw.sources ?? []) as DataSource[];
+      return { primaryEnabled: raw.primaryEnabled !== false, sources: (raw.sources ?? []) as DataSource[] };
     }
   } catch {}
-  return [];
+  return { primaryEnabled: true, sources: [] };
 }
 
-function getSourcesHash(sources: DataSource[]): string {
-  return sources
+export function loadSources(): DataSource[] {
+  return loadSourcesConfig().sources;
+}
+
+function getSourcesHash(primaryEnabled: boolean, sources: DataSource[]): string {
+  const parts = sources
     .filter((s) => s.enabled)
     .map((s) => `${s.path}|${s.label}`)
-    .sort()
-    .join(";");
+    .sort();
+  return `primary:${primaryEnabled};${parts.join(";")}`;
 }
 
 function findJsonlFiles(dir: string): string[] {
@@ -221,23 +225,33 @@ interface SourceDir {
   label?: string;
 }
 
-function getSourceDirs(): SourceDir[] {
-  const dirs: SourceDir[] = [{ dir: CLAUDE_DIR }];
-  const sources = loadSources();
-  for (const src of sources) {
+function getSourceDirs(): { dirs: SourceDir[]; primaryEnabled: boolean; sources: DataSource[] } {
+  const sf = loadSourcesConfig();
+  const dirs: SourceDir[] = [];
+  if (sf.primaryEnabled) {
+    dirs.push({ dir: CLAUDE_DIR });
+  }
+  for (const src of sf.sources) {
     if (src.enabled && src.path && fs.existsSync(src.path)) {
       dirs.push({ dir: src.path, label: src.label });
     }
   }
-  return dirs;
+  return { dirs, primaryEnabled: sf.primaryEnabled, sources: sf.sources };
 }
 
-export function readAllUsageData(): UsageEntry[] {
-  const startTime = Date.now();
+export type ProgressStep = "init" | "scan" | "check" | "process" | "sort" | "save" | "analyze" | "done";
+export type ProgressCallback = (step: ProgressStep, message: string, current?: number, total?: number) => void;
 
-  const sourceDirs = getSourceDirs();
-  const sources = loadSources();
-  const currentSourcesHash = getSourcesHash(sources);
+export function readAllUsageData(onProgress?: ProgressCallback): UsageEntry[] {
+  const startTime = Date.now();
+  const progress = onProgress ?? (() => {});
+
+  progress("scan", "Scanning data sources...");
+
+  const { dirs: sourceDirs, primaryEnabled, sources } = getSourceDirs();
+  const currentSourcesHash = getSourcesHash(primaryEnabled, sources);
+
+  progress("scan", `Scanning ${sourceDirs.length} source(s) for JSONL files...`);
 
   // Collect all JSONL files from all sources, tracking which source each comes from
   const allFiles: string[] = [];
@@ -255,6 +269,7 @@ export function readAllUsageData(): UsageEntry[] {
   console.log(
     `[reader] Found ${allFiles.length} JSONL files across ${sourceDirs.length} source(s) (${Date.now() - startTime}ms)`
   );
+  progress("scan", `Found ${allFiles.length} JSONL files`, allFiles.length, allFiles.length);
 
   const cacheMeta = loadCacheMeta();
   const cachedFileMap = cacheMeta?.files || {};
@@ -264,6 +279,8 @@ export function readAllUsageData(): UsageEntry[] {
 
   const newOrChanged: string[] = [];
   const currentFileMap: Record<string, { mtime: number; size: number }> = {};
+
+  progress("check", "Checking file changes...");
 
   for (const file of allFiles) {
     try {
@@ -283,6 +300,7 @@ export function readAllUsageData(): UsageEntry[] {
   }
 
   console.log(`[reader] ${allFiles.length - newOrChanged.length} cached, ${newOrChanged.length} new/changed`);
+  progress("check", `${allFiles.length - newOrChanged.length} cached, ${newOrChanged.length} to process`, newOrChanged.length, allFiles.length);
 
   // No changes — return cache
   if (newOrChanged.length === 0 && cacheMeta && !sourcesChanged) {
@@ -290,6 +308,7 @@ export function readAllUsageData(): UsageEntry[] {
     if (cached.length > 0) {
       saveCacheMeta({ files: currentFileMap, lastFullScan: Date.now(), sourcesHash: currentSourcesHash });
       console.log(`[reader] Cache hit: ${cached.length} entries (${Date.now() - startTime}ms)`);
+      progress("done", `Loaded ${cached.length} entries from cache`, cached.length, cached.length);
       return cached;
     }
   }
@@ -299,6 +318,7 @@ export function readAllUsageData(): UsageEntry[] {
 
   if (!sourcesChanged && newOrChanged.length < allFiles.length * 0.3 && cacheMeta) {
     // Incremental: load cache, remove entries from changed files, process changed
+    progress("process", `Incremental update: processing ${newOrChanged.length} files...`, 0, newOrChanged.length);
     entries = loadCachedEntries();
     const changedSessionFiles = new Set(newOrChanged.map((f) => path.basename(f, ".jsonl")));
     for (const e of entries) {
@@ -306,26 +326,38 @@ export function readAllUsageData(): UsageEntry[] {
     }
     entries = entries.filter((e) => !changedSessionFiles.has(e.sessionId));
 
-    for (const file of newOrChanged) {
+    for (let i = 0; i < newOrChanged.length; i++) {
+      const file = newOrChanged[i];
       const src = fileSourceMap.get(file)!;
       entries.push(...processFile(file, extractProjectName(file, src.dir, src.label), seen));
+      if (i % 5 === 0 || i === newOrChanged.length - 1) {
+        progress("process", `Processing file ${i + 1}/${newOrChanged.length}`, i + 1, newOrChanged.length);
+      }
     }
     console.log(`[reader] Incremental: processed ${newOrChanged.length} files`);
   } else {
     // Full rebuild
+    progress("process", `Full rebuild: processing ${allFiles.length} files...`, 0, allFiles.length);
     entries = [];
-    for (const file of allFiles) {
+    for (let i = 0; i < allFiles.length; i++) {
+      const file = allFiles[i];
       const src = fileSourceMap.get(file)!;
       entries.push(...processFile(file, extractProjectName(file, src.dir, src.label), seen));
+      if (i % 5 === 0 || i === allFiles.length - 1) {
+        progress("process", `Processing file ${i + 1}/${allFiles.length}`, i + 1, allFiles.length);
+      }
     }
     console.log(`[reader] Full rebuild: processed ${allFiles.length} files`);
   }
 
+  progress("sort", `Sorting ${entries.length} entries...`);
   entries.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
+  progress("save", "Saving cache...");
   saveCachedEntries(entries);
   saveCacheMeta({ files: currentFileMap, lastFullScan: Date.now(), sourcesHash: currentSourcesHash });
 
   console.log(`[reader] Done: ${entries.length} entries in ${Date.now() - startTime}ms`);
+  progress("done", `Done: ${entries.length} entries in ${Date.now() - startTime}ms`, entries.length, entries.length);
   return entries;
 }

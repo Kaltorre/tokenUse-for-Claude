@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import * as fs from "fs";
 import * as path from "path";
 import { SourcesConfig, DataSource } from "@/lib/types";
+import { loadSourcesConfig } from "@/lib/reader";
+
+export const dynamic = "force-dynamic";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const SOURCES_FILE = path.join(DATA_DIR, "sources.json");
@@ -9,16 +12,6 @@ const SOURCES_FILE = path.join(DATA_DIR, "sources.json");
 function ensureDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
-function readSources(): SourcesConfig {
-  try {
-    if (!fs.existsSync(SOURCES_FILE)) return { sources: [] };
-    const raw = fs.readFileSync(SOURCES_FILE, "utf-8");
-    return JSON.parse(raw) as SourcesConfig;
-  } catch {
-    return { sources: [] };
   }
 }
 
@@ -39,7 +32,7 @@ function validateSource(body: Partial<DataSource>): string | null {
 
 /** GET — return all sources */
 export async function GET() {
-  return NextResponse.json(readSources());
+  return NextResponse.json(loadSourcesConfig());
 }
 
 /** POST — add a new source */
@@ -51,7 +44,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    const config = readSources();
+    const config = loadSourcesConfig();
 
     // Check for duplicate path
     const normalizedPath = body.path!.trim().replace(/\\/g, "/");
@@ -94,7 +87,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    const config = readSources();
+    const config = loadSourcesConfig();
     const idx = config.sources.findIndex((s) => s.id === body.id);
     if (idx === -1) {
       return NextResponse.json({ error: "Source not found" }, { status: 404 });
@@ -113,6 +106,23 @@ export async function PUT(request: Request) {
   }
 }
 
+/** PATCH — toggle primaryEnabled */
+export async function PATCH(request: Request) {
+  try {
+    const body = (await request.json()) as { primaryEnabled?: boolean };
+    if (typeof body.primaryEnabled !== "boolean") {
+      return NextResponse.json({ error: "primaryEnabled must be a boolean" }, { status: 400 });
+    }
+    const config = loadSourcesConfig();
+    config.primaryEnabled = body.primaryEnabled;
+    writeSources(config);
+    return NextResponse.json({ ok: true, primaryEnabled: config.primaryEnabled });
+  } catch (error) {
+    console.error("[sources] PATCH error:", error);
+    return NextResponse.json({ error: "Failed to update primary source" }, { status: 500 });
+  }
+}
+
 /** DELETE — remove a source by id */
 export async function DELETE(request: Request) {
   try {
@@ -121,7 +131,7 @@ export async function DELETE(request: Request) {
     if (!id) {
       return NextResponse.json({ error: "Missing id param" }, { status: 400 });
     }
-    const config = readSources();
+    const config = loadSourcesConfig();
     config.sources = config.sources.filter((s) => s.id !== id);
     writeSources(config);
     return NextResponse.json({ ok: true });
