@@ -541,7 +541,6 @@ function syncCalibrationPoints(points: CalibrationPoint[]): {
     };
   }
 
-  const allEntries = readAllUsageData();
   const promos = readPromos();
 
   let changed = false;
@@ -550,7 +549,19 @@ function syncCalibrationPoints(points: CalibrationPoint[]): {
   let recomputed = 0;
   let failed = 0;
 
-  for (const point of points) {
+  // First pass: check if any point actually needs repair to avoid loading heavy data
+  const needsRepairFlags = points.map((p) => needsCalibrationRepair(p));
+  const anyNeedsRepair = needsRepairFlags.some(Boolean);
+
+  // Only load usage data if at least one point needs repair
+  let allEntries: UsageEntry[] | null = null;
+  if (anyNeedsRepair) {
+    allEntries = readAllUsageData();
+  }
+
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+
     // Strip leftover promoMultiplier from old data
     if ("promoMultiplier" in point) {
       delete (point as Record<string, unknown>).promoMultiplier;
@@ -558,9 +569,14 @@ function syncCalibrationPoints(points: CalibrationPoint[]): {
       recomputed++;
     }
 
+    // Skip expensive snapshot computation for points that don't need repair
+    if (!needsRepairFlags[i] && !("promoMultiplier" in point)) continue;
+
     const missingTokens = point.tokens == null;
     const missingNormalized = point.normalizedTokens == null;
-    const snapshot = computeSnapshotForCalibration(point.scope, point.timestamp, allEntries);
+    const snapshot = allEntries
+      ? computeSnapshotForCalibration(point.scope, point.timestamp, allEntries)
+      : null;
 
     if (!snapshot) {
       if (needsCalibrationRepair(point)) {
@@ -587,13 +603,9 @@ function syncCalibrationPoints(points: CalibrationPoint[]): {
   return { changed, backfilled, normalizedBackfilled, recomputed, failed };
 }
 
-/** GET — return all calibration points */
+/** GET — return all calibration points (no heavy sync — use PATCH for repair) */
 export async function GET() {
   const file = readCalFile();
-  const repair = syncCalibrationPoints(file.calibrations);
-  if (repair.changed) {
-    writeCalFile(file);
-  }
   return NextResponse.json(file.calibrations);
 }
 

@@ -11,6 +11,7 @@ const CLAUDE_DIR = path.join(os.homedir(), ".claude", "projects");
 const CACHE_DIR = path.join(os.homedir(), ".claude-monitor-cache");
 const DB_FILE = path.join(CACHE_DIR, "usage-store.sqlite");
 const STORE_RECONCILE_MS = 60_000;
+const FULL_RECONCILE_MS = 3 * 60_000;
 
 export type ProgressStep =
   | "init"
@@ -83,6 +84,7 @@ interface UsageStoreWatchState {
   dirty: boolean;
   lastEventAt: number;
   ignoreUntil: number;
+  changedPaths: Set<string>;
 }
 
 declare global {
@@ -90,6 +92,8 @@ declare global {
   var __usageStoreDb: DatabaseSync | undefined;
   // eslint-disable-next-line no-var
   var __usageStoreLastSync: { at: number; result: UsageStoreSyncResult } | undefined;
+  // eslint-disable-next-line no-var
+  var __usageStoreLastFullSync: number | undefined;
   // eslint-disable-next-line no-var
   var __usageStoreWatchState: UsageStoreWatchState | undefined;
 }
@@ -139,6 +143,7 @@ function ensureSourceWatchers(sourceDirs: SourceDir[], sourcesKey: string): Usag
     dirty: false,
     lastEventAt: 0,
     ignoreUntil: Date.now() + 1_000,
+    changedPaths: new Set(),
   };
 
   globalThis.__usageStoreWatchState = state;
@@ -153,6 +158,18 @@ function ensureSourceWatchers(sourceDirs: SourceDir[], sourcesKey: string): Usag
         (_eventType, filename) => {
           if (watchEventTouchesUsageStore(filename)) {
             markStoreDirty();
+            if (filename) {
+              const name = String(filename);
+              let jsonlPath: string | null = null;
+              if (name.endsWith(".jsonl")) {
+                jsonlPath = path.join(source.dir, name);
+              } else if (name.endsWith(".meta.json")) {
+                jsonlPath = path.join(source.dir, name.replace(/\.meta\.json$/, ".jsonl"));
+              }
+              if (jsonlPath) {
+                state.changedPaths.add(jsonlPath);
+              }
+            }
           }
         }
       );
@@ -718,6 +735,40 @@ function processFileChange(
   });
 }
 
+function buildTargetedScan(changedPaths: Set<string>, sourceDirs: SourceDir[]): ScannedFile[] {
+  const scanned: ScannedFile[] = [];
+
+  for (const filePath of changedPaths) {
+    if (!filePath.endsWith(".jsonl")) continue;
+
+    const source = sourceDirs.find((s) => filePath.startsWith(s.dir));
+    if (!source) continue;
+
+    try {
+      if (!fs.existsSync(filePath)) continue;
+
+      const stat = fs.statSync(filePath);
+      const meta = getMetaStats(filePath);
+
+      scanned.push({
+        path: filePath,
+        sourceDir: source.dir,
+        sourceLabel: source.label ?? null,
+        project: extractProjectName(filePath, source.dir, source.label),
+        observedSize: stat.size,
+        lastOffset: 0,
+        mtimeMs: stat.mtimeMs,
+        metaSize: meta.metaSize,
+        metaMtimeMs: meta.metaMtimeMs,
+      });
+    } catch {
+      // Skip unreadable files.
+    }
+  }
+
+  return scanned;
+}
+
 export function syncUsageStore(onProgress?: ProgressCallback): UsageStoreSyncResult {
   const progress = onProgress ?? (() => {});
   const now = Date.now();
@@ -747,6 +798,102 @@ export function syncUsageStore(onProgress?: ProgressCallback): UsageStoreSyncRes
   const previousSourcesHash = getMetadata(db, "sources_hash") ?? "";
   const sourcesChanged = previousSourcesHash !== "" && previousSourcesHash !== currentSourcesHash;
 
+  // Targeted scan: when watcher tracked specific files, skip full directory scan
+  const lastFullSyncAt = globalThis.__usageStoreLastFullSync ?? 0;
+  const canDoTargetedSync =
+    lastSync &&
+    !sourcesChanged &&
+    watchState.dirty &&
+    watchState.changedPaths.size > 0 &&
+    watchState.changedPaths.size <= 50 &&
+    now - lastFullSyncAt < FULL_RECONCILE_MS;
+
+  if (canDoTargetedSync) {
+    progress("check", `Targeted check of ${watchState.changedPaths.size} changed file(s)...`);
+
+    const changedScanned = buildTargetedScan(watchState.changedPaths, sourceDirs);
+    const existingFiles = listExistingFiles(db);
+    let changed = false;
+    let processedFiles = 0;
+
+    // Check for deletions among tracked paths
+    for (const changedPath of watchState.changedPaths) {
+      if (!changedPath.endsWith(".jsonl")) continue;
+      if (existingFiles.has(changedPath) && !fs.existsSync(changedPath)) {
+        deleteFileData(db, changedPath);
+        changed = true;
+      }
+    }
+
+    for (const file of changedScanned) {
+      const existing = existingFiles.get(file.path);
+
+      if (!existing) {
+        processFileChange(db, file, "rebuild", 0);
+        changed = true;
+        processedFiles++;
+        continue;
+      }
+
+      if (file.metaSize !== existing.metaSize || file.metaMtimeMs !== existing.metaMtimeMs) {
+        processFileChange(db, file, "rebuild", 0);
+        changed = true;
+        processedFiles++;
+        continue;
+      }
+
+      if (file.observedSize < existing.observedSize || file.observedSize < existing.lastOffset) {
+        processFileChange(db, file, "rebuild", 0);
+        changed = true;
+        processedFiles++;
+        continue;
+      }
+
+      if (file.observedSize === existing.observedSize && file.mtimeMs !== existing.mtimeMs) {
+        processFileChange(db, file, "rebuild", 0);
+        changed = true;
+        processedFiles++;
+        continue;
+      }
+
+      if (file.observedSize > existing.observedSize) {
+        processFileChange(db, file, "append", existing.lastOffset);
+        changed = true;
+        processedFiles++;
+      }
+    }
+
+    setMetadata(db, "sources_hash", currentSourcesHash);
+    if (changed) {
+      bumpRevision(db);
+    }
+
+    const meta = buildMeta(db);
+    progress(
+      "done",
+      changed
+        ? `Targeted sync: ${processedFiles} file(s) updated in ${Date.now() - startTime}ms`
+        : `No changes in tracked files (${meta.entriesCount} entries)`,
+      meta.entriesCount,
+      meta.entriesCount
+    );
+
+    watchState.changedPaths.clear();
+    watchState.dirty = watchState.lastEventAt > now;
+    watchState.ignoreUntil = Date.now() + 2_000;
+
+    const result: UsageStoreSyncResult = {
+      meta,
+      changed,
+      scannedFiles: changedScanned.length,
+      processedFiles,
+    };
+
+    globalThis.__usageStoreLastSync = { at: Date.now(), result };
+    return result;
+  }
+
+  // Full scan path
   progress("scan", "Scanning data sources...");
   progress("scan", `Scanning ${sourceDirs.length} source(s) for JSONL files...`);
 
@@ -849,9 +996,12 @@ export function syncUsageStore(onProgress?: ProgressCallback): UsageStoreSyncRes
     processedFiles,
   };
 
+  globalThis.__usageStoreLastFullSync = Date.now();
   if (globalThis.__usageStoreWatchState?.key === currentSourcesHash) {
+    globalThis.__usageStoreWatchState.changedPaths.clear();
     globalThis.__usageStoreWatchState.dirty =
       globalThis.__usageStoreWatchState.lastEventAt > now;
+    globalThis.__usageStoreWatchState.ignoreUntil = Date.now() + 2_000;
   }
 
   globalThis.__usageStoreLastSync = { at: Date.now(), result };
