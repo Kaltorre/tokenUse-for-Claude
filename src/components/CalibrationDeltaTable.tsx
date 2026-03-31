@@ -125,6 +125,7 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
   const [scope, setScope] = useState<ScopeFilter>("weekly-all");
   const [minDelta, setMinDelta] = useState(0);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [summaryOnly, setSummaryOnly] = useState(false);
 
   const toggleRow = (key: string) =>
     setExpandedRows((prev) => {
@@ -366,16 +367,29 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
           </p>
         </div>
 
-        <select
-          value={minDelta}
-          onChange={(e) => setMinDelta(Number(e.target.value))}
-          className="text-[10px] px-2 py-1 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)] border border-[var(--border-subtle)]"
-        >
-          <option value={0}>All Δ%</option>
-          <option value={2}>Δ% ≥ 2</option>
-          <option value={3}>Δ% ≥ 3</option>
-          <option value={5}>Δ% ≥ 5</option>
-        </select>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setSummaryOnly((v) => !v)}
+            className={`text-[10px] px-2 py-1 rounded border transition-all font-medium ${
+              summaryOnly
+                ? "bg-[var(--accent-purple)]/15 text-[var(--accent-purple)] border-[var(--accent-purple)]/40"
+                : "bg-[var(--bg-secondary)] text-[var(--text-muted)] border-[var(--border-subtle)] hover:text-[var(--text-secondary)]"
+            }`}
+            title="Pokaż tylko wiersze Σ (sumy okresów)"
+          >
+            Σ only
+          </button>
+          <select
+            value={minDelta}
+            onChange={(e) => setMinDelta(Number(e.target.value))}
+            className="text-[10px] px-2 py-1 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)] border border-[var(--border-subtle)]"
+          >
+            <option value={0}>All Δ%</option>
+            <option value={2}>Δ% ≥ 2</option>
+            <option value={3}>Δ% ≥ 3</option>
+            <option value={5}>Δ% ≥ 5</option>
+          </select>
+        </div>
       </div>
 
       <div className="flex gap-1 bg-[var(--bg-secondary)] rounded-md p-0.5 w-fit">
@@ -544,7 +558,7 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
                   </tr>
                 </thead>
                 <tbody>
-                  {week.rows.map((row, idx) => {
+                  {!summaryOnly && week.rows.map((row, idx) => {
                     const isZero = row.deltaCost <= 0;
                     const rowKey = `${week.weekStart}-${idx}`;
                     const hasModels = row.modelDeltas.length > 0;
@@ -709,7 +723,7 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
                     );
                   })}
                   {/* ── Σ Summary row ── */}
-                  {week.rows.length > 1 && (
+                  {(week.rows.length > 1 || summaryOnly) && (
                     <tr className="border-t-2 border-[var(--border-subtle)] bg-[var(--bg-secondary)] font-semibold">
                       <td className="py-1.5 px-1.5 text-[var(--accent-purple)] whitespace-nowrap text-[11px]">
                         Σ {week.weekLabel}

@@ -1438,11 +1438,14 @@ export function CalibrationPanel({
     await onCalibrationChange();
   };
 
+  const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<ReturnType<typeof groupByObservation>[0] | null>(null);
+
   const handleRemoveGroup = async (group: ReturnType<typeof groupByObservation>[0]) => {
     const ids = Object.values(group.points).filter(Boolean).map((p) => p!.id);
     for (const id of ids) {
       await fetch(`/api/calibrations?id=${id}`, { method: "DELETE" });
     }
+    setConfirmDeleteGroup(null);
     await onCalibrationChange();
   };
 
@@ -1707,7 +1710,7 @@ export function CalibrationPanel({
                               Edit
                             </button>
                             <button
-                              onClick={() => handleRemoveGroup(g)}
+                              onClick={(e) => { e.stopPropagation(); setConfirmDeleteGroup(g); }}
                               className="px-1.5 py-0.5 rounded text-[10px] text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--bg-secondary)] transition-colors"
                               title="Usuń obserwację"
                             >
@@ -1740,6 +1743,34 @@ export function CalibrationPanel({
           }
           onClose={() => { setShowDialog(false); setEditingGroup(null); }}
         />
+      )}
+
+      {confirmDeleteGroup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in">
+          <div className="bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg p-5 shadow-xl max-w-sm w-full mx-4">
+            <h3 className="text-sm font-semibold mb-2">Usunąć obserwację?</h3>
+            <p className="text-[12px] text-[var(--text-muted)] mb-1">
+              {formatTime(confirmDeleteGroup.timestamp)}
+            </p>
+            <p className="text-[12px] text-[var(--text-muted)] mb-4">
+              {Object.values(confirmDeleteGroup.points).filter(Boolean).length} punkt(ów) kalibracji zostanie trwale usuniętych z bazy.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmDeleteGroup(null)}
+                className="px-3 py-1.5 rounded text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] transition-colors"
+              >
+                Anuluj
+              </button>
+              <button
+                onClick={() => handleRemoveGroup(confirmDeleteGroup)}
+                className="px-3 py-1.5 rounded text-[12px] bg-red-600 text-white hover:bg-red-700 transition-colors"
+              >
+                Usuń
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
