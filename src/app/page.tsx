@@ -36,6 +36,7 @@ import { CalibrationDeltaTable } from "@/components/CalibrationDeltaTable";
 import { PlanPeriod, PromoPeriod } from "@/lib/types";
 import { useTheme, ThemeToggle } from "@/components/ThemeToggle";
 import { SourcesPanel } from "@/components/SourcesPanel";
+import { SessionSearch } from "@/components/SessionSearch";
 
 type Tab = "overview" | "sessions" | "projects" | "limits" | "weeklyAgg" | "deltaAnalysis" | "weeklyWindows" | "calibration" | "plan" | "promos" | "sources" | "pricing";
 
@@ -535,6 +536,7 @@ export default function Home() {
         {/* Sessions Tab */}
         {tab === "sessions" && (
           <div className="animate-fade-in">
+            <SessionSearch />
             <SessionList sessions={data.sessions} derivedLimits={activeDerivedLimits} />
           </div>
         )}
