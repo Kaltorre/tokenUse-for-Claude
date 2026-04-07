@@ -294,11 +294,11 @@ export function getPromoMultiplier(
       : isInPromoRange(windowStart)
       ? 2
       : 1;
-  const inPromo = splitHasPromo || configuredMultiplier > 1;
+  const inPromo = splitHasPromo || configuredMultiplier !== 1;
   if (!inPromo) return 1;
-  if (peakStatus === "off-peak") return configuredMultiplier > 1 ? configuredMultiplier : 2;
+  if (peakStatus === "off-peak") return configuredMultiplier !== 1 ? configuredMultiplier : 2;
   if (peakStatus === "mixed") {
-    return configuredMultiplier > 1 ? configuredMultiplier : 2;
+    return configuredMultiplier !== 1 ? configuredMultiplier : 2;
   }
   return 1; // peak
 }

@@ -93,8 +93,8 @@ function PromoDialog({ initial, onSave, onClose }: PromoDialogProps) {
     if (!name.trim()) return "Name is required.";
     if (!dateFrom || !dateTo) return "Date range is required.";
     if (dateFrom > dateTo) return "Date from must be earlier than or equal to date to.";
-    if (!Number.isFinite(multiplier) || multiplier < 1) {
-      return "Multiplier must be at least 1.";
+    if (!Number.isFinite(multiplier) || multiplier <= 0 || multiplier > 10) {
+      return "Multiplier must be between 0.01 and 10.";
     }
 
     const hasHours = scheduleType === "daily-hours" || (scheduleType === "weekdays" && useHours);
@@ -342,14 +342,16 @@ function PromoDialog({ initial, onSave, onClose }: PromoDialogProps) {
             <label className="block text-xs text-[var(--text-muted)] mb-1">Multiplier</label>
             <input
               type="number"
-              min={1}
+              min={0.01}
               max={10}
               step={0.1}
               value={multiplier}
               onChange={(e) => setMultiplier(parseFloat(e.target.value) || 1)}
               className="w-24 bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-blue)] transition-colors"
             />
-            <span className="ml-2 text-xs text-[var(--text-muted)]">x limit during off-peak</span>
+            <span className="ml-2 text-xs text-[var(--text-muted)]">
+              {multiplier < 1 ? "x limit (reduced capacity)" : "x limit (bonus capacity)"}
+            </span>
           </div>
 
           {error && (
@@ -419,7 +421,7 @@ export function PromoPanel({ periods, onPeriodsChange }: PromoPanelProps) {
         <div>
           <h2 className="text-sm font-semibold text-[var(--text-primary)]">Promo Periods</h2>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            Configure promotional multiplier windows (e.g. 2x off-peak limits)
+            Configure capacity multiplier windows (&gt;1 = bonus, &lt;1 = reduced)
           </p>
         </div>
         <button
@@ -459,10 +461,14 @@ export function PromoPanel({ periods, onPeriodsChange }: PromoPanelProps) {
                   className="grid grid-cols-[1fr_1fr_1fr_auto_auto] gap-3 items-center px-3 py-2.5 rounded-lg border transition-colors"
                   style={{
                     borderColor: isActive
-                      ? "color-mix(in srgb, var(--accent-orange) 50%, transparent)"
+                      ? p.multiplier < 1
+                        ? "color-mix(in srgb, var(--accent-red) 50%, transparent)"
+                        : "color-mix(in srgb, var(--accent-orange) 50%, transparent)"
                       : "var(--border-subtle)",
                     background: isActive
-                      ? "color-mix(in srgb, var(--accent-orange) 6%, transparent)"
+                      ? p.multiplier < 1
+                        ? "color-mix(in srgb, var(--accent-red) 6%, transparent)"
+                        : "color-mix(in srgb, var(--accent-orange) 6%, transparent)"
                       : undefined,
                     opacity: isPast ? 0.6 : 1,
                   }}
@@ -471,7 +477,11 @@ export function PromoPanel({ periods, onPeriodsChange }: PromoPanelProps) {
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="text-sm font-medium text-[var(--text-primary)] truncate">{p.name}</span>
                     {isActive && (
-                      <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded bg-[var(--accent-orange)]/20 text-[var(--accent-orange)] font-medium">
+                      <span className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                        p.multiplier < 1
+                          ? "bg-[var(--accent-red)]/20 text-[var(--accent-red)]"
+                          : "bg-[var(--accent-orange)]/20 text-[var(--accent-orange)]"
+                      }`}>
                         active
                       </span>
                     )}
@@ -496,8 +506,10 @@ export function PromoPanel({ periods, onPeriodsChange }: PromoPanelProps) {
                   <div
                     className="text-xs font-bold px-2 py-1 rounded text-center tabular-nums"
                     style={{
-                      background: "color-mix(in srgb, var(--accent-orange) 18%, transparent)",
-                      color: "var(--accent-orange)",
+                      background: p.multiplier < 1
+                        ? "color-mix(in srgb, var(--accent-red) 18%, transparent)"
+                        : "color-mix(in srgb, var(--accent-orange) 18%, transparent)",
+                      color: p.multiplier < 1 ? "var(--accent-red)" : "var(--accent-orange)",
                       minWidth: 36,
                     }}
                   >
@@ -542,11 +554,11 @@ export function PromoPanel({ periods, onPeriodsChange }: PromoPanelProps) {
       {/* Info note */}
       <div className="text-xs text-[var(--text-muted)] px-1 space-y-1">
         <p>
-          Multiplier is the maximum (off-peak) value. The effective multiplier scales by peak status:
-          peak = 1x, mixed = weighted avg, off-peak = full multiplier.
+          Multiplier &gt;1 = bonus capacity (e.g. 2x off-peak), &lt;1 = reduced capacity (e.g. 0.5x peak hours).
+          Effective multiplier scales by peak status: standard = 1x, mixed = weighted avg, promo = full multiplier.
         </p>
         <p>
-          When multiple promo periods overlap, the highest multiplier wins.
+          When multiple periods overlap, their multipliers are combined (multiplied together).
         </p>
       </div>
 

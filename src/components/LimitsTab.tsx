@@ -113,7 +113,7 @@ function getWindowPromoMultiplier(
   }
   if (win.peakStatus === "off-peak") {
     const configured = getStartPromoMultiplier(win.startTime, promoPeriods);
-    return configured > 1 ? configured : 1;
+    return configured !== 1 ? configured : 1;
   }
   return 1;
 }
@@ -1117,6 +1117,11 @@ function FiveHourAccordion({ windows, solvedLimits, derivedLimits, overrides, on
                       promo
                     </span>
                   )}
+                  {getWindowPromoMultiplier(win, promoPeriods) < 1 && win.peakStatus === "off-peak" && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--accent-red)]/20 text-[var(--accent-red)]">
+                      reduced
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-4 shrink-0">
                   <span className="text-xs text-[var(--text-secondary)] tabular-nums flex flex-col items-end leading-tight">
@@ -1427,7 +1432,7 @@ function WeeklyWindowsView({
   const [viewMode, setViewMode] = useState<ViewMode>("output");
   const [editKey, setEditKey] = useState<string | null>(null);
   const promoActiveNowLocal = promoPeriods.length > 0
-    ? getActivePromoMultiplier(new Date().toISOString(), promoPeriods) > 1
+    ? getActivePromoMultiplier(new Date().toISOString(), promoPeriods) !== 1
     : isInPromoRange(new Date().toISOString());
   const sorted = [...windows].sort(
     (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
@@ -1470,7 +1475,7 @@ function WeeklyWindowsView({
 
     const nowIso = new Date().toISOString();
     const promoActiveNow = promoPeriods.length > 0
-      ? getActivePromoMultiplier(nowIso, promoPeriods) > 1
+      ? getActivePromoMultiplier(nowIso, promoPeriods) !== 1
       : isInPromoRange(nowIso);
     const hasPromoUsageInBucket = (bucket.peakSplit?.offPeak.totalTokens ?? 0) > 0;
 

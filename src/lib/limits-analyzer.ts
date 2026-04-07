@@ -40,18 +40,18 @@ function getEntryPromoMultiplier(timestamp: string, promos: PromoPeriod[]): numb
 
   const date = new Date(timestamp);
   const tMs = date.getTime();
-  let maxMultiplier = 1;
+  let result = 1;
 
   for (const promo of promos) {
     const from = new Date(promo.dateFrom).getTime();
     const to = new Date(promo.dateTo).getTime();
     if (tMs < from || tMs > to) continue;
     if (matchesPromoSchedule(date, promo.schedule)) {
-      maxMultiplier = Math.max(maxMultiplier, promo.multiplier);
+      result *= promo.multiplier;
     }
   }
 
-  return maxMultiplier;
+  return result;
 }
 
 function sumGroup(group: UsageEntry[]): PeakSplitTokens {
@@ -131,7 +131,7 @@ function classifyPeakStatus(entries: UsageEntry[], promos: PromoPeriod[]): PeakS
   for (const e of entries) {
     const d = new Date(e.timestamp);
     const multiplier = getEntryPromoMultiplier(e.timestamp, promos);
-    if (multiplier > 1) {
+    if (multiplier !== 1) {
       hasBonus = true;
       hasPromoContext = true;
     } else {
@@ -251,8 +251,8 @@ function buildWindow(
       totalCost: group.reduce((s, e) => s + e.cost, 0),
       messageCount: group.length,
     });
-    const offPeakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) > 1);
-    const peakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) <= 1);
+    const offPeakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) !== 1);
+    const peakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) === 1);
     peakSplit = { peak: sumGroup(peakEntries), offPeak: sumGroup(offPeakEntries) };
   }
 
@@ -368,13 +368,13 @@ function buildBucketsForFilter(
 
     const isCurrentWeek = now >= weekStart && now < weekEnd;
     const bonusEntries = weekEntries.filter(
-      (e) => getEntryPromoMultiplier(e.timestamp, promos) > 1
+      (e) => getEntryPromoMultiplier(e.timestamp, promos) !== 1
     );
     const standardEntries =
       bonusEntries.length === 0
         ? weekEntries
         : weekEntries.filter(
-            (e) => getEntryPromoMultiplier(e.timestamp, promos) <= 1
+            (e) => getEntryPromoMultiplier(e.timestamp, promos) === 1
           );
 
     const peakStatus: PeakStatus =

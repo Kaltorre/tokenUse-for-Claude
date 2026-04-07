@@ -165,17 +165,17 @@ function buildPromoContext(params: {
     promos.length > 0 ? getActivePromoMultiplier(start, promos) : 1;
 
   let effectiveMultiplier = explicitMultiplier ?? 1;
-  if (effectiveMultiplier <= 1) {
+  if (effectiveMultiplier === 1) {
     if (peakSplit && peakSplit.offPeak.totalTokens > 0) {
       effectiveMultiplier = computeWeightedPromoMultiplier(peakSplit);
-    } else if (configuredMaxMultiplier > 1 && peakStatus === "off-peak") {
-      effectiveMultiplier = startMultiplier > 1 ? startMultiplier : configuredMaxMultiplier;
-    } else if (configuredMaxMultiplier > 1 && peakStatus === "mixed") {
+    } else if (configuredMaxMultiplier !== 1 && peakStatus === "off-peak") {
+      effectiveMultiplier = startMultiplier !== 1 ? startMultiplier : configuredMaxMultiplier;
+    } else if (configuredMaxMultiplier !== 1 && peakStatus === "mixed") {
       effectiveMultiplier = 1 + (configuredMaxMultiplier - 1) * 0.5;
     }
   }
 
-  const bonusApplied = effectiveMultiplier > 1;
+  const bonusApplied = effectiveMultiplier !== 1;
   const standardCost =
     peakSplit != null
       ? peakSplit.peak.totalCost
@@ -511,7 +511,7 @@ function buildExportData() {
       };
     }),
     promoInfo: {
-      activeAtExport: getActivePromoMultiplier(exportedAt, promos) > 1,
+      activeAtExport: getActivePromoMultiplier(exportedAt, promos) !== 1,
       activeMultiplierAtExport: getActivePromoMultiplier(exportedAt, promos),
       periods: promos.map((promo) => ({
         id: promo.id,

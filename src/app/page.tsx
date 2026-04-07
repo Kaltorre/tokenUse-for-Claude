@@ -30,6 +30,7 @@ import { CalibrationPanel } from "@/components/CalibrationPanel";
 import { PricingTable } from "@/components/PricingTable";
 import { PlanTab } from "@/components/PlanTab";
 import { PromoPanel } from "@/components/PromoPanel";
+import { ClaudeUsagePanel } from "@/components/ClaudeUsagePanel";
 import { WeeklyWindowsConfigTab } from "@/components/WeeklyWindowsConfigTab";
 import { WeeklyAggregationTab } from "@/components/WeeklyAggregationTab";
 import { CalibrationDeltaTable } from "@/components/CalibrationDeltaTable";
@@ -38,7 +39,7 @@ import { useTheme, ThemeToggle } from "@/components/ThemeToggle";
 import { SourcesPanel } from "@/components/SourcesPanel";
 import { SessionSearch } from "@/components/SessionSearch";
 
-type Tab = "overview" | "sessions" | "projects" | "limits" | "weeklyAgg" | "deltaAnalysis" | "weeklyWindows" | "calibration" | "plan" | "promos" | "sources" | "pricing";
+type Tab = "overview" | "sessions" | "projects" | "limits" | "weeklyAgg" | "deltaAnalysis" | "weeklyWindows" | "calibration" | "plan" | "promos" | "sources" | "pricing" | "claudeUsage";
 
 type NavItem = { key: Tab; label: string; icon: string; indent?: boolean };
 type NavSection = { section: string; items: NavItem[] };
@@ -62,6 +63,7 @@ const NAV_ENTRIES: NavEntry[] = [
       { key: "weeklyWindows", label: "Windows", icon: "▣", indent: true },
       { key: "promos", label: "Promos", icon: "✦", indent: true },
       { key: "calibration", label: "Calibration", icon: "⊕", indent: true },
+      { key: "claudeUsage", label: "Claude.ai", icon: "◉", indent: true },
       { key: "sources", label: "Sources", icon: "⊞", indent: true },
     ],
   },
@@ -626,6 +628,13 @@ export default function Home() {
         {tab === "promos" && (
           <div className="animate-fade-in max-w-4xl">
             <PromoPanel periods={promoPeriods} onPeriodsChange={handlePromoChange} />
+          </div>
+        )}
+
+        {/* Claude.ai Usage Tab */}
+        {tab === "claudeUsage" && (
+          <div className="animate-fade-in max-w-4xl">
+            <ClaudeUsagePanel />
           </div>
         )}
 

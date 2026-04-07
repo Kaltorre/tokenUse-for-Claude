@@ -184,11 +184,11 @@ function buildSnapshotContext(
   peakSplit?: FiveHourWindow["peakSplit"];
   normalizedTokens: NonNullable<CalibrationPoint["normalizedTokens"]>;
 } {
-  const bonusEntries = relevant.filter((e) => entryPromoMultiplier(e.timestamp, promos) > 1);
+  const bonusEntries = relevant.filter((e) => entryPromoMultiplier(e.timestamp, promos) !== 1);
   const standardEntries =
     bonusEntries.length === 0
       ? relevant
-      : relevant.filter((e) => entryPromoMultiplier(e.timestamp, promos) <= 1);
+      : relevant.filter((e) => entryPromoMultiplier(e.timestamp, promos) === 1);
 
   const peakStatus =
     bonusEntries.length === 0

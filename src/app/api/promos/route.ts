@@ -86,8 +86,8 @@ function validatePromoInput(body: Partial<PromoPeriod>): string | null {
   if (new Date(body.dateFrom).getTime() > new Date(body.dateTo).getTime()) {
     return "Date from must be earlier than or equal to date to.";
   }
-  if (typeof body.multiplier !== "number" || !Number.isFinite(body.multiplier) || body.multiplier < 1) {
-    return "Multiplier must be at least 1.";
+  if (typeof body.multiplier !== "number" || !Number.isFinite(body.multiplier) || body.multiplier <= 0 || body.multiplier > 10) {
+    return "Multiplier must be between 0.01 and 10.";
   }
 
   return validateSchedule(body.schedule);

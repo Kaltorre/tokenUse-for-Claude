@@ -27,7 +27,7 @@ export function getActivePromoMultiplier(
   const t = new Date(isoTimestamp);
   const tMs = t.getTime();
 
-  let maxMultiplier = 1;
+  let result = 1;
 
   for (const period of promos) {
     const from = new Date(period.dateFrom).getTime();
@@ -35,13 +35,11 @@ export function getActivePromoMultiplier(
     if (tMs < from || tMs > to) continue;
 
     if (matchesSchedule(t, period.schedule)) {
-      if (period.multiplier > maxMultiplier) {
-        maxMultiplier = period.multiplier;
-      }
+      result *= period.multiplier;
     }
   }
 
-  return maxMultiplier;
+  return result;
 }
 
 /**
@@ -53,7 +51,7 @@ export function isInPromoSchedule(
   isoTimestamp: string,
   promos: PromoPeriod[]
 ): boolean {
-  return getActivePromoMultiplier(isoTimestamp, promos) > 1;
+  return getActivePromoMultiplier(isoTimestamp, promos) !== 1;
 }
 
 /** @deprecated Use isInPromoSchedule with promos array instead */
@@ -91,7 +89,7 @@ export function rangeHasPromoUsage(
   }
 
   if (promos.length > 0) {
-    return getActivePromoMultiplier(rangeStart, promos) > 1;
+    return getActivePromoMultiplier(rangeStart, promos) !== 1;
   }
 
   return isInPromoRange(rangeStart);
@@ -105,12 +103,12 @@ function inferBonusMultiplier(
 ): number {
   const activeAtStart =
     promos.length > 0 ? getActivePromoMultiplier(windowStart, promos) : isInPromoRange(windowStart) ? 2 : 1;
-  const hasBonus = rangeHasPromoUsage(peakStatus, windowStart, peakSplit, promos) || activeAtStart > 1;
-  if (!hasBonus) return 1;
+  const hasPromo = rangeHasPromoUsage(peakStatus, windowStart, peakSplit, promos) || activeAtStart !== 1;
+  if (!hasPromo) return 1;
 
-  if (activeAtStart > 1) return activeAtStart;
+  if (activeAtStart !== 1) return activeAtStart;
 
-  const configured = [...new Set(promos.map((promo) => promo.multiplier).filter((m) => m > 1))];
+  const configured = [...new Set(promos.map((promo) => promo.multiplier).filter((m) => m !== 1))];
   if (configured.length === 1) return configured[0];
 
   return 2;
@@ -153,7 +151,7 @@ export function normalizeUsageToBase(
 
   if (peakStatus === "off-peak") {
     const bonusMultiplier = inferBonusMultiplier(windowStart, peakStatus, peakSplit, promos);
-    if (bonusMultiplier > 1) {
+    if (bonusMultiplier !== 1) {
       return {
         output: usage.output / bonusMultiplier,
         input: usage.input / bonusMultiplier,

@@ -373,7 +373,7 @@ export interface PromoPeriod {
   dateFrom: string;   // ISO 8601
   dateTo: string;     // ISO 8601
   schedule: PromoSchedule;
-  multiplier: number; // max off-peak multiplier, e.g. 2.0 for 2x
+  multiplier: number; // capacity multiplier: >1 = bonus (e.g. 2x), <1 = reduced (e.g. 0.5x)
 }
 
 export interface PromoConfig {
