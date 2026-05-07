@@ -12,6 +12,7 @@ import {
   SessionOverrides,
   CalibrationPoint,
   PlanPeriod,
+  SessionStats,
   PLAN_TIERS,
   PromoPeriod,
   DEFAULT_LIMITS_5H,
@@ -34,11 +35,28 @@ import {
   BOTTLENECK_COLORS,
 } from "@/lib/utilization";
 import { computeWeightedPromoMultiplier } from "@/lib/limits-analyzer";
+import {
+  LimitRegimeEvidenceRow,
+  buildUtilizationResidual,
+  buildLimitRegimeEvidence,
+  estimatePctFromCostProxy,
+} from "@/lib/limit-regimes";
+import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const EMPTY_PROMO_PERIODS: PromoPeriod[] = [];
 const EMPTY_PLAN_PERIODS: PlanPeriod[] = [];
+const EMPTY_SESSIONS: SessionStats[] = [];
 
 function formatLocalTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
@@ -72,6 +90,16 @@ function formatWeekRange(weekStart: string, weekEnd: string): string {
 
 function formatPct(value: number | null): string {
   return value == null ? "—" : `${value.toFixed(1)}%`;
+}
+
+function formatSignedPct(value: number | null): string {
+  if (value == null) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)} pp`;
+}
+
+function formatRatio(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(2)}x`;
 }
 
 /** Standard ISO week key: YYYY-WNN */
@@ -162,6 +190,300 @@ function getWeeklyOverrideMatch(
   }
 
   return null;
+}
+
+// ─── Regime evidence matrix ─────────────────────────────────────────────────
+
+function statusColor(status: LimitRegimeEvidenceRow["latestResidual"]["status"]): string {
+  if (status === "close") return "var(--accent-green)";
+  if (status === "watch") return "var(--accent-orange)";
+  if (status === "suspicious") return "var(--accent-red)";
+  return "var(--text-muted)";
+}
+
+function regimeLabel(row: LimitRegimeEvidenceRow): string {
+  if (row.regime) return row.regime.label;
+  if (row.regimeStatus === "ambiguous") return "Ambiguous regime";
+  return "Unassigned regime";
+}
+
+function scopeLabel(scope: CalibrationScope): string {
+  if (scope === "5h") return "5h";
+  if (scope === "weekly-all") return "Weekly ALL";
+  return "Weekly SNNT";
+}
+
+function LimitRegimeEvidencePanel({
+  calibrations,
+  planPeriods,
+}: {
+  calibrations: CalibrationPoint[];
+  planPeriods: PlanPeriod[];
+}) {
+  const rows = buildLimitRegimeEvidence(calibrations, planPeriods);
+  const hasRows = rows.length > 0;
+  const chartPoints = rows
+    .flatMap((row) =>
+      row.points.map((point) => {
+        const estimatedPct = estimatePctFromCostProxy(
+          point.costProxy,
+          row.effectiveCostProxyLimit
+        );
+        const residual = buildUtilizationResidual(point.observedPct, estimatedPct);
+        return {
+          id: point.id,
+          timestamp: point.timestamp,
+          time: `${formatShortDate(point.timestamp)} ${formatLocalTime(point.timestamp)}`,
+          regime: regimeLabel(row),
+          scope: scopeLabel(row.scope),
+          observedPct: point.observedPct,
+          estimatedPct,
+          deltaPct: residual.deltaPct,
+        };
+      })
+    )
+    .filter((point) => point.estimatedPct != null)
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+    .slice(-80);
+
+  return (
+    <div className="card p-5 space-y-4">
+      <div className="flex flex-col gap-1 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h3 className="text-sm font-medium text-[var(--text-secondary)]">
+            Plan / Window Inference
+          </h3>
+          <p className="text-[10px] text-[var(--text-muted)] mt-1">
+            Cost proxy is inferred from observed Anthropic % per plan epoch and window.
+            Theory match compares inferred multiplier against the configured plan hypothesis.
+          </p>
+        </div>
+        <span className="text-[10px] text-[var(--text-muted)]">
+          {rows.length} calibrated regimes
+        </span>
+      </div>
+
+      {!hasRows ? (
+        <div className="rounded-lg bg-[var(--bg-secondary)] p-4 text-center text-xs text-[var(--text-muted)]">
+          Add calibration points with observed Anthropic % to infer cost proxy per 1%.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="border-b border-[var(--border-subtle)]">
+                <th className="py-2 pr-3 text-left font-medium text-[var(--text-muted)]">
+                  Regime
+                </th>
+                <th className="px-3 py-2 text-left font-medium text-[var(--text-muted)]">
+                  Window
+                </th>
+                <th className="px-3 py-2 text-right font-medium text-[var(--text-muted)]">
+                  Points
+                </th>
+                <th className="px-3 py-2 text-right font-medium text-[var(--text-muted)]">
+                  Cost proxy / 1%
+                </th>
+                <th className="px-3 py-2 text-right font-medium text-[var(--text-muted)]">
+                  Effective 100%
+                </th>
+                <th className="px-3 py-2 text-right font-medium text-[var(--text-muted)]">
+                  Theory
+                </th>
+                <th className="px-3 py-2 text-right font-medium text-[var(--text-muted)]">
+                  Inferred
+                </th>
+                <th className="px-3 py-2 text-right font-medium text-[var(--text-muted)]">
+                  Match
+                </th>
+                <th className="pl-3 py-2 text-right font-medium text-[var(--text-muted)]">
+                  Latest delta
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => {
+                const color = row.regime
+                  ? PLAN_TIERS[row.regime.tier].color
+                  : "var(--text-muted)";
+                const residualColor = statusColor(row.latestResidual.status);
+
+                return (
+                  <tr
+                    key={row.key}
+                    className="border-b border-[var(--border-subtle)]/70 last:border-0"
+                  >
+                    <td className="py-2 pr-3">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ background: color }}
+                        />
+                        <span className="font-medium" style={{ color }}>
+                          {regimeLabel(row)}
+                        </span>
+                      </div>
+                      <div className="text-[9px] text-[var(--text-muted)]">
+                        {row.regime?.startDate
+                          ? `${formatShortDate(row.regime.startDate)} - ${
+                              row.regime.endDate ? formatShortDate(row.regime.endDate) : "now"
+                            }`
+                          : row.regimeStatus}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-[var(--text-secondary)]">
+                      {scopeLabel(row.scope)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-[var(--text-muted)]">
+                      {row.calibrationCount}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-[var(--accent-orange)]">
+                      {row.costProxyPerPct == null ? "—" : formatCost(row.costProxyPerPct)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-[var(--accent-orange)]">
+                      {row.effectiveCostProxyLimit == null
+                        ? "—"
+                        : formatCost(row.effectiveCostProxyLimit)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-[var(--text-muted)]">
+                      {formatRatio(row.theoreticalMultiplier)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-[var(--text-secondary)]">
+                      {formatRatio(row.inferredMultiplier)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-[var(--text-secondary)]">
+                      {formatRatio(row.theoryMatchRatio)}
+                    </td>
+                    <td className="pl-3 py-2 text-right tabular-nums">
+                      <span
+                        className="rounded px-2 py-1 font-medium"
+                        style={{
+                          color: residualColor,
+                          background: `color-mix(in srgb, ${residualColor} 12%, transparent)`,
+                        }}
+                      >
+                        {formatSignedPct(row.latestResidual.deltaPct)}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {chartPoints.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <h4 className="text-xs font-medium text-[var(--text-secondary)]">
+                Observed vs Estimated
+              </h4>
+              <p className="text-[10px] text-[var(--text-muted)]">
+                Lines compare Anthropic observed % with the current cost-proxy estimate.
+                Bars are signed residuals.
+              </p>
+            </div>
+            <span className="text-[10px] text-[var(--text-muted)]">
+              latest {chartPoints.length} points
+            </span>
+          </div>
+          <div className="h-[260px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartPoints}>
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="var(--border-subtle)"
+                  vertical={false}
+                />
+                <XAxis
+                  dataKey="time"
+                  tick={{ fill: "var(--text-muted)", fontSize: 10 }}
+                  axisLine={{ stroke: "var(--border-subtle)" }}
+                  tickLine={false}
+                  minTickGap={32}
+                />
+                <YAxis
+                  yAxisId="pct"
+                  tick={{ fill: "var(--text-muted)", fontSize: 10 }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={38}
+                  unit="%"
+                />
+                <YAxis
+                  yAxisId="delta"
+                  orientation="right"
+                  tick={{ fill: "var(--text-muted)", fontSize: 10 }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={42}
+                  unit="pp"
+                />
+                <Tooltip
+                  contentStyle={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    color: "var(--text-secondary)",
+                    fontSize: 12,
+                  }}
+                  labelFormatter={(
+                    _,
+                    payload: ReadonlyArray<{ payload?: (typeof chartPoints)[number] }>
+                  ) => {
+                    const point = payload?.[0]?.payload as
+                      | (typeof chartPoints)[number]
+                      | undefined;
+                    return point
+                      ? `${point.time} · ${point.regime} · ${point.scope}`
+                      : "";
+                  }}
+                  formatter={(value: number, name) => {
+                    const label =
+                      name === "observedPct"
+                        ? "Observed"
+                        : name === "estimatedPct"
+                        ? "Estimated"
+                        : "Delta";
+                    const suffix = name === "deltaPct" ? " pp" : "%";
+                    return [`${Number(value).toFixed(1)}${suffix}`, label];
+                  }}
+                />
+                <Bar
+                  yAxisId="delta"
+                  dataKey="deltaPct"
+                  fill="var(--accent-orange)"
+                  opacity={0.35}
+                  radius={[3, 3, 0, 0]}
+                  name="Delta"
+                />
+                <Line
+                  yAxisId="pct"
+                  type="monotone"
+                  dataKey="observedPct"
+                  stroke="var(--accent-blue)"
+                  strokeWidth={2}
+                  dot={{ r: 3, fill: "var(--accent-blue)" }}
+                  name="Observed"
+                />
+                <Line
+                  yAxisId="pct"
+                  type="monotone"
+                  dataKey="estimatedPct"
+                  stroke="var(--accent-green)"
+                  strokeWidth={2}
+                  dot={{ r: 3, fill: "var(--accent-green)" }}
+                  name="Estimated"
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Token breakdown sub-component ───────────────────────────────────────────
@@ -919,6 +1241,292 @@ function StatusCards({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── Session pressure (REQ-015) ───────────────────────────────────────────────
+
+interface SessionPressurePanelProps {
+  sessions: SessionStats[];
+  currentWindow: FiveHourWindow | null;
+  currentWeekAll: WeeklyBucket | null;
+  solvedLimits: Record<CalibrationScope, SolvedLimits> | null;
+  derivedLimits: DerivedLimits | null;
+  calibrations: CalibrationPoint[];
+  planPeriods?: PlanPeriod[];
+  promoPeriods?: PromoPeriod[];
+}
+
+interface SessionPressureRow {
+  session: SessionStats;
+  in5h: boolean;
+  inWeekly: boolean;
+  impact5hPct: number | null;
+  impactWeeklyPct: number | null;
+  driver: "input" | "output" | "cache create" | "cache read" | "mixed";
+  modelMix: string;
+}
+
+function overlapsRange(startIso: string, endIso: string, rangeStartIso: string, rangeEndIso: string): boolean {
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  const rangeStart = new Date(rangeStartIso).getTime();
+  const rangeEnd = new Date(rangeEndIso).getTime();
+  if (![start, end, rangeStart, rangeEnd].every(Number.isFinite)) return false;
+  return start <= rangeEnd && end >= rangeStart;
+}
+
+function shortSessionId(sessionId: string): string {
+  return sessionId.length <= 12 ? sessionId : `${sessionId.slice(0, 8)}...${sessionId.slice(-4)}`;
+}
+
+function modelMixLabel(models: Record<string, number>): string {
+  const entries = Object.entries(models).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return "unknown";
+  return entries.slice(0, 2).map(([model, count]) => `${model} ${count}`).join(" / ");
+}
+
+function pressureDriver(session: SessionStats): SessionPressureRow["driver"] {
+  const parts = [
+    ["input", session.inputTokens],
+    ["output", session.outputTokens],
+    ["cache create", session.cacheCreationTokens],
+    ["cache read", session.cacheReadTokens],
+  ] as const;
+  const sorted = [...parts].sort((a, b) => b[1] - a[1]);
+  const total = parts.reduce((sum, [, value]) => sum + value, 0);
+  if (total <= 0) return "mixed";
+  if (sorted[0][1] / total < 0.45) return "mixed";
+  return sorted[0][0];
+}
+
+function pressureState(impact5hPct: number | null, impactWeeklyPct: number | null): string {
+  const five = impact5hPct ?? 0;
+  const week = impactWeeklyPct ?? 0;
+  if (five < 1 && week < 1) return "low pressure";
+  if (five >= 10 && week >= 10) return "both constrained";
+  if (five >= week * 1.5 && five >= 3) return "5h constrained";
+  if (week >= five * 1.5 && week >= 3) return "weekly constrained";
+  return "balanced pressure";
+}
+
+function sessionUsage(session: SessionStats) {
+  return {
+    outputTokens: session.outputTokens,
+    inputTokens: session.inputTokens,
+    cacheCreationTokens: session.cacheCreationTokens,
+    cacheReadTokens: session.cacheReadTokens,
+    totalTokens: session.totalTokens,
+    totalCost: session.totalCost,
+    peakStatus: "peak" as const,
+    windowStart: session.startTime,
+  };
+}
+
+function SessionPressurePanel({
+  sessions,
+  currentWindow,
+  currentWeekAll,
+  solvedLimits,
+  derivedLimits,
+  calibrations,
+  planPeriods = EMPTY_PLAN_PERIODS,
+  promoPeriods = EMPTY_PROMO_PERIODS,
+}: SessionPressurePanelProps) {
+  const currentWindowIds = new Set(currentWindow?.sessionIds ?? []);
+  const windowPlanTier = currentWindow
+    ? getPlanTierForDate(currentWindow.startTime, planPeriods)
+    : null;
+  const weekPlanTier = currentWeekAll
+    ? getPlanTierForDate(currentWeekAll.weekStart, planPeriods)
+    : null;
+  const windowPlanMult = getDisplayPlanMultiplier(windowPlanTier, solvedLimits, "5h");
+  const weekPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "weekly-all");
+  const currentWindowAnchor = currentWindow
+    ? findCalibrationAnchor(calibrations, "5h", currentWindow.startTime)
+    : undefined;
+  const currentWeekAnchor = currentWeekAll
+    ? findCalibrationAnchor(calibrations, "weekly-all", currentWeekAll.weekStart)
+    : undefined;
+  const currentWindowInsight = currentWindow
+    ? computeLimitInsight({
+        scope: "5h",
+        usage: {
+          outputTokens: currentWindow.outputTokens,
+          inputTokens: currentWindow.inputTokens,
+          cacheCreationTokens: currentWindow.cacheCreationTokens,
+          cacheReadTokens: currentWindow.cacheReadTokens,
+          totalTokens: currentWindow.totalTokens,
+          totalCost: currentWindow.totalCost,
+          peakStatus: currentWindow.peakStatus,
+          peakSplit: currentWindow.peakSplit,
+          windowStart: currentWindow.startTime,
+        },
+        solvedLimits,
+        derivedLimits,
+        promos: promoPeriods,
+        planMultiplier: windowPlanMult,
+        observedPoint: currentWindowAnchor,
+      })
+    : null;
+  const currentWeekInsight = currentWeekAll
+    ? computeLimitInsight({
+        scope: "weekly-all",
+        usage: {
+          outputTokens: currentWeekAll.outputTokens,
+          inputTokens: currentWeekAll.inputTokens,
+          cacheCreationTokens: currentWeekAll.cacheCreationTokens,
+          cacheReadTokens: currentWeekAll.cacheReadTokens,
+          totalTokens: currentWeekAll.totalTokens,
+          totalCost: currentWeekAll.totalCost,
+          peakStatus: currentWeekAll.peakStatus ?? "peak",
+          peakSplit: currentWeekAll.peakSplit,
+          windowStart: currentWeekAll.weekStart,
+        },
+        solvedLimits,
+        derivedLimits,
+        promos: promoPeriods,
+        planMultiplier: weekPlanMult,
+        observedPoint: currentWeekAnchor,
+      })
+    : null;
+
+  const rows = sessions
+    .map((session): SessionPressureRow | null => {
+      const in5h = currentWindowIds.has(session.sessionId);
+      const inWeekly = currentWeekAll
+        ? overlapsRange(session.startTime, session.endTime, currentWeekAll.weekStart, currentWeekAll.weekEnd)
+        : false;
+      if (!in5h && !inWeekly) return null;
+
+      const impact5h = in5h
+        ? computeLimitInsight({
+            scope: "5h",
+            usage: sessionUsage(session),
+            solvedLimits,
+            derivedLimits,
+            promos: promoPeriods,
+            planMultiplier: windowPlanMult,
+          }).estimatedPct
+        : null;
+      const impactWeekly = inWeekly
+        ? computeLimitInsight({
+            scope: "weekly-all",
+            usage: sessionUsage(session),
+            solvedLimits,
+            derivedLimits,
+            promos: promoPeriods,
+            planMultiplier: weekPlanMult,
+          }).estimatedPct
+        : null;
+
+      return {
+        session,
+        in5h,
+        inWeekly,
+        impact5hPct: impact5h,
+        impactWeeklyPct: impactWeekly,
+        driver: pressureDriver(session),
+        modelMix: modelMixLabel(session.models),
+      };
+    })
+    .filter((row): row is SessionPressureRow => row != null)
+    .sort(
+      (a, b) =>
+        Math.max(b.impact5hPct ?? 0, b.impactWeeklyPct ?? 0) -
+        Math.max(a.impact5hPct ?? 0, a.impactWeeklyPct ?? 0)
+    )
+    .slice(0, 12);
+
+  const state = pressureState(
+    currentWindowInsight?.estimatedPct ?? null,
+    currentWeekInsight?.estimatedPct ?? null
+  );
+
+  return (
+    <div className="card p-5 space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium text-[var(--text-secondary)]">
+            Session Limit Pressure
+          </h3>
+          <p className="text-[10px] text-[var(--text-muted)] mt-1">
+            Per-session cost proxy contribution to the active 5h and weekly scopes.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 text-[11px]">
+          <span className="px-2 py-1 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+            5h est. {formatPct(currentWindowInsight?.estimatedPct ?? null)}
+          </span>
+          <span className="px-2 py-1 rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+            Weekly est. {formatPct(currentWeekInsight?.estimatedPct ?? null)}
+          </span>
+          <span className="px-2 py-1 rounded bg-[var(--accent-orange)]/10 text-[var(--accent-orange)]">
+            {state}
+          </span>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="text-xs text-[var(--text-muted)]">
+          No active sessions in the current 5h or weekly scope.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border-subtle)]">
+                <th className="text-left py-2 pr-3 font-medium">Session</th>
+                <th className="text-left py-2 px-3 font-medium">Project</th>
+                <th className="text-left py-2 px-3 font-medium">Model mix</th>
+                <th className="text-right py-2 px-3 font-medium">Cost proxy</th>
+                <th className="text-right py-2 px-3 font-medium">5h impact</th>
+                <th className="text-right py-2 px-3 font-medium">Weekly impact</th>
+                <th className="text-left py-2 pl-3 font-medium">Driver</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr
+                  key={row.session.sessionId}
+                  className="border-b border-[var(--border-subtle)] last:border-0 text-[var(--text-secondary)]"
+                >
+                  <td className="py-2 pr-3 font-mono text-[11px]" title={row.session.sessionId}>
+                    {shortSessionId(row.session.sessionId)}
+                    <div className="text-[10px] text-[var(--text-muted)] font-sans">
+                      {formatShortDate(row.session.startTime)} {formatLocalTime(row.session.startTime)}-{formatLocalTime(row.session.endTime)}
+                    </div>
+                  </td>
+                  <td className="py-2 px-3 max-w-36 truncate" title={row.session.project}>
+                    {row.session.project || "unknown"}
+                  </td>
+                  <td className="py-2 px-3 max-w-48 truncate" title={row.modelMix}>
+                    {row.modelMix}
+                  </td>
+                  <td className="py-2 px-3 text-right tabular-nums">
+                    {formatCost(row.session.totalCost)}
+                    <div className="text-[10px] text-[var(--text-muted)]">
+                      {formatTokens(row.session.totalTokens)}
+                    </div>
+                  </td>
+                  <td className="py-2 px-3 text-right tabular-nums">
+                    {row.in5h ? formatPct(row.impact5hPct) : "—"}
+                  </td>
+                  <td className="py-2 px-3 text-right tabular-nums">
+                    {row.inWeekly ? formatPct(row.impactWeeklyPct) : "—"}
+                  </td>
+                  <td className="py-2 pl-3">
+                    <span className="px-2 py-0.5 rounded bg-[var(--bg-secondary)] text-[10px] uppercase tracking-wide">
+                      {row.driver}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -2005,6 +2613,7 @@ interface LimitsTabProps {
   solvedLimits: Record<CalibrationScope, SolvedLimits> | null;
   derivedLimits: DerivedLimits | null;
   calibrations: CalibrationPoint[];
+  sessions?: SessionStats[];
   planPeriods?: PlanPeriod[];
   promoPeriods?: PromoPeriod[];
 }
@@ -2014,6 +2623,7 @@ export function LimitsTab({
   solvedLimits,
   derivedLimits,
   calibrations,
+  sessions = EMPTY_SESSIONS,
   planPeriods = EMPTY_PLAN_PERIODS,
   promoPeriods = EMPTY_PROMO_PERIODS,
 }: LimitsTabProps) {
@@ -2094,11 +2704,27 @@ export function LimitsTab({
         <span><span className="font-semibold text-[var(--text-secondary)]">No promo</span> = ten sam usage policzony bez bonusu promo</span>
       </div>
 
+      <LimitRegimeEvidencePanel
+        calibrations={calibrations}
+        planPeriods={planPeriods}
+      />
+
       {/* Section A: Status cards */}
       <StatusCards
         currentWindow={limitsData.currentWindow}
         currentWeekAll={limitsData.currentWeekAll}
         currentWeekSonnet={limitsData.currentWeekSonnet}
+        solvedLimits={effectiveSolvedLimits}
+        derivedLimits={derivedLimits}
+        calibrations={calibrations}
+        planPeriods={planPeriods}
+        promoPeriods={promoPeriods}
+      />
+
+      <SessionPressurePanel
+        sessions={sessions}
+        currentWindow={limitsData.currentWindow}
+        currentWeekAll={limitsData.currentWeekAll}
         solvedLimits={effectiveSolvedLimits}
         derivedLimits={derivedLimits}
         calibrations={calibrations}

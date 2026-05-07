@@ -55,13 +55,27 @@ function getEntryPromoMultiplier(timestamp: string, promos: PromoPeriod[]): numb
 }
 
 function sumGroup(group: UsageEntry[]): PeakSplitTokens {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheCreationTokens = 0;
+  let cacheReadTokens = 0;
+  let totalTok = 0;
+  let totalCost = 0;
+  for (const e of group) {
+    inputTokens += e.usage.input_tokens;
+    outputTokens += e.usage.output_tokens;
+    cacheCreationTokens += e.usage.cache_creation_input_tokens;
+    cacheReadTokens += e.usage.cache_read_input_tokens;
+    totalTok += totalTokens(e);
+    totalCost += e.cost;
+  }
   return {
-    inputTokens: group.reduce((s, e) => s + e.usage.input_tokens, 0),
-    outputTokens: group.reduce((s, e) => s + e.usage.output_tokens, 0),
-    cacheCreationTokens: group.reduce((s, e) => s + e.usage.cache_creation_input_tokens, 0),
-    cacheReadTokens: group.reduce((s, e) => s + e.usage.cache_read_input_tokens, 0),
-    totalTokens: group.reduce((s, e) => s + totalTokens(e), 0),
-    totalCost: group.reduce((s, e) => s + e.cost, 0),
+    inputTokens,
+    outputTokens,
+    cacheCreationTokens,
+    cacheReadTokens,
+    totalTokens: totalTok,
+    totalCost,
     messageCount: group.length,
   };
 }
@@ -118,43 +132,6 @@ export function computeWeightedPromoMultiplier(
   if (totalAll === 0) return 1.5; // fallback if no tokens yet
   const offPeakFraction = peakSplit.offPeak.totalTokens / totalAll;
   return Math.round((1 + offPeakFraction) * 100) / 100; // 1x + offPeakFrac * 1x
-}
-
-/** Determine peak status for a window based on its entries */
-function classifyPeakStatus(entries: UsageEntry[], promos: PromoPeriod[]): PeakStatus {
-  if (entries.length === 0) return "off-peak";
-
-  let hasBonus = false;
-  let hasStandard = false;
-  let hasPromoContext = false;
-
-  for (const e of entries) {
-    const d = new Date(e.timestamp);
-    const multiplier = getEntryPromoMultiplier(e.timestamp, promos);
-    if (multiplier !== 1) {
-      hasBonus = true;
-      hasPromoContext = true;
-    } else {
-      hasStandard = true;
-      const inLegacyPromoWindow =
-        promos.length === 0 && d >= PROMO_START && d <= PROMO_END;
-      const inConfiguredPromoWindow =
-        promos.length > 0 &&
-        promos.some((promo) => {
-          const from = new Date(promo.dateFrom).getTime();
-          const to = new Date(promo.dateTo).getTime();
-          const time = d.getTime();
-          return time >= from && time <= to;
-        });
-      if (inLegacyPromoWindow || inConfiguredPromoWindow) {
-        hasPromoContext = true;
-      }
-    }
-    if (hasBonus && hasStandard) return "mixed";
-  }
-
-  if (hasBonus) return "off-peak";
-  return hasPromoContext ? "peak" : "off-peak";
 }
 
 function isSonnetModel(model: string): boolean {
@@ -215,48 +192,154 @@ function buildWindow(
   const isActive = now < end;
   const lastEntry = entries[entries.length - 1];
 
-  const sessionIds = [...new Set(entries.map((e) => e.sessionId))];
+  const sessionIdSet = new Set<string>();
   const models: FiveHourWindow["models"] = {};
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheCreationTokens = 0;
+  let cacheReadTokens = 0;
+  let totalTok = 0;
+  let totalCost = 0;
+
+  let normalizedInputTokens = 0;
+  let normalizedOutputTokens = 0;
+  let normalizedCacheCreationTokens = 0;
+  let normalizedCacheReadTokens = 0;
+  let normalizedTotalTokens = 0;
+  let normalizedCost = 0;
+
+  let hasBonus = false;
+  let hasStandard = false;
+  let hasPromoContext = false;
+
+  let peakInput = 0;
+  let peakOutput = 0;
+  let peakCacheCreation = 0;
+  let peakCacheRead = 0;
+  let peakTotal = 0;
+  let peakCost = 0;
+  let peakMessages = 0;
+
+  let offInput = 0;
+  let offOutput = 0;
+  let offCacheCreation = 0;
+  let offCacheRead = 0;
+  let offTotal = 0;
+  let offCost = 0;
+  let offMessages = 0;
+
   for (const e of entries) {
+    sessionIdSet.add(e.sessionId);
+
+    const tt = totalTokens(e);
+    inputTokens += e.usage.input_tokens;
+    outputTokens += e.usage.output_tokens;
+    cacheCreationTokens += e.usage.cache_creation_input_tokens;
+    cacheReadTokens += e.usage.cache_read_input_tokens;
+    totalTok += tt;
+    totalCost += e.cost;
+
+    const multiplier = getEntryPromoMultiplier(e.timestamp, promos) || 1;
+    normalizedInputTokens += e.usage.input_tokens / multiplier;
+    normalizedOutputTokens += e.usage.output_tokens / multiplier;
+    normalizedCacheCreationTokens += e.usage.cache_creation_input_tokens / multiplier;
+    normalizedCacheReadTokens += e.usage.cache_read_input_tokens / multiplier;
+    normalizedTotalTokens += tt / multiplier;
+    normalizedCost += e.cost / multiplier;
+
+    if (multiplier !== 1) {
+      hasBonus = true;
+      hasPromoContext = true;
+      offInput += e.usage.input_tokens;
+      offOutput += e.usage.output_tokens;
+      offCacheCreation += e.usage.cache_creation_input_tokens;
+      offCacheRead += e.usage.cache_read_input_tokens;
+      offTotal += tt;
+      offCost += e.cost;
+      offMessages += 1;
+    } else {
+      hasStandard = true;
+      peakInput += e.usage.input_tokens;
+      peakOutput += e.usage.output_tokens;
+      peakCacheCreation += e.usage.cache_creation_input_tokens;
+      peakCacheRead += e.usage.cache_read_input_tokens;
+      peakTotal += tt;
+      peakCost += e.cost;
+      peakMessages += 1;
+      if (!hasPromoContext) {
+        const d = new Date(e.timestamp);
+        const inLegacyPromoWindow =
+          promos.length === 0 && d >= PROMO_START && d <= PROMO_END;
+        const inConfiguredPromoWindow =
+          promos.length > 0 &&
+          promos.some((promo) => {
+            const from = new Date(promo.dateFrom).getTime();
+            const to = new Date(promo.dateTo).getTime();
+            const time = d.getTime();
+            return time >= from && time <= to;
+          });
+        if (inLegacyPromoWindow || inConfiguredPromoWindow) {
+          hasPromoContext = true;
+        }
+      }
+    }
+
     const name = getModelDisplayName(e.model);
-    const m = models[name] ?? {
-      messageCount: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationTokens: 0,
-      cacheReadTokens: 0,
-      totalTokens: 0,
-      totalCost: 0,
-    };
+    let m = models[name];
+    if (!m) {
+      m = {
+        messageCount: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+        totalTokens: 0,
+        totalCost: 0,
+      };
+      models[name] = m;
+    }
     m.messageCount += 1;
     m.inputTokens += e.usage.input_tokens;
     m.outputTokens += e.usage.output_tokens;
     m.cacheCreationTokens += e.usage.cache_creation_input_tokens;
     m.cacheReadTokens += e.usage.cache_read_input_tokens;
-    m.totalTokens += totalTokens(e);
+    m.totalTokens += tt;
     m.totalCost += e.cost;
-    models[name] = m;
   }
 
-  const peakStatus = classifyPeakStatus(entries, promos);
+  const peakStatus: PeakStatus = entries.length === 0
+    ? "off-peak"
+    : hasBonus && hasStandard
+      ? "mixed"
+      : hasBonus
+        ? "off-peak"
+        : hasPromoContext
+          ? "peak"
+          : "off-peak";
 
-  let peakSplit: FiveHourWindow["peakSplit"] = undefined;
-  if (peakStatus === "mixed") {
-    const sumGroup = (group: UsageEntry[]): PeakSplitTokens => ({
-      inputTokens: group.reduce((s, e) => s + e.usage.input_tokens, 0),
-      outputTokens: group.reduce((s, e) => s + e.usage.output_tokens, 0),
-      cacheCreationTokens: group.reduce((s, e) => s + e.usage.cache_creation_input_tokens, 0),
-      cacheReadTokens: group.reduce((s, e) => s + e.usage.cache_read_input_tokens, 0),
-      totalTokens: group.reduce((s, e) => s + totalTokens(e), 0),
-      totalCost: group.reduce((s, e) => s + e.cost, 0),
-      messageCount: group.length,
-    });
-    const offPeakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) !== 1);
-    const peakEntries = entries.filter((e) => getEntryPromoMultiplier(e.timestamp, promos) === 1);
-    peakSplit = { peak: sumGroup(peakEntries), offPeak: sumGroup(offPeakEntries) };
-  }
-
-  const normalized = sumNormalizedUsage(entries, promos);
+  const peakSplit: FiveHourWindow["peakSplit"] = peakStatus === "mixed"
+    ? {
+        peak: {
+          inputTokens: peakInput,
+          outputTokens: peakOutput,
+          cacheCreationTokens: peakCacheCreation,
+          cacheReadTokens: peakCacheRead,
+          totalTokens: peakTotal,
+          totalCost: peakCost,
+          messageCount: peakMessages,
+        },
+        offPeak: {
+          inputTokens: offInput,
+          outputTokens: offOutput,
+          cacheCreationTokens: offCacheCreation,
+          cacheReadTokens: offCacheRead,
+          totalTokens: offTotal,
+          totalCost: offCost,
+          messageCount: offMessages,
+        },
+      }
+    : undefined;
 
   return {
     id,
@@ -266,15 +349,20 @@ function buildWindow(
     status: isActive ? "active" : "expired",
     peakStatus,
     peakSplit,
-    inputTokens: entries.reduce((s, e) => s + e.usage.input_tokens, 0),
-    outputTokens: entries.reduce((s, e) => s + e.usage.output_tokens, 0),
-    cacheCreationTokens: entries.reduce((s, e) => s + e.usage.cache_creation_input_tokens, 0),
-    cacheReadTokens: entries.reduce((s, e) => s + e.usage.cache_read_input_tokens, 0),
-    totalTokens: entries.reduce((s, e) => s + totalTokens(e), 0),
-    totalCost: entries.reduce((s, e) => s + e.cost, 0),
-    ...normalized,
+    inputTokens,
+    outputTokens,
+    cacheCreationTokens,
+    cacheReadTokens,
+    totalTokens: totalTok,
+    totalCost,
+    normalizedInputTokens,
+    normalizedOutputTokens,
+    normalizedCacheCreationTokens,
+    normalizedCacheReadTokens,
+    normalizedTotalTokens,
+    normalizedCost,
     messageCount: entries.length,
-    sessionIds,
+    sessionIds: [...sessionIdSet],
     models,
     timeRemainingMs: isActive ? end.getTime() - now.getTime() : 0,
   };

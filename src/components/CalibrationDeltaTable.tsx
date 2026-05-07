@@ -37,6 +37,8 @@ interface DeltaRow {
   deltaCost: number;
   rawCostPerPct: number;
   normalizedCostPerPct: number;
+  predictedDeltaPct: number | null;
+  residualDeltaPct: number | null;
   deltaOutput: number;
   outputPerPct: number;
   deltaInput: number;
@@ -93,6 +95,45 @@ interface WeekGroup {
   avgOutputPerPct: number;
   avgTotalPerPct: number;
   totals: WeekGroupTotals;
+}
+
+type HypothesisKey =
+  | "raw-total-tokens"
+  | "public-price-cost"
+  | "output-heavy"
+  | "cache-discounted";
+
+interface HypothesisSummary {
+  key: HypothesisKey;
+  label: string;
+  predictedDeltaPct: number;
+  residualPct: number;
+  avgAbsResidualPct: number;
+  signalPerPct: number;
+}
+
+const HYPOTHESES: { key: HypothesisKey; label: string }[] = [
+  { key: "public-price-cost", label: "Public price cost proxy" },
+  { key: "raw-total-tokens", label: "Raw total tokens" },
+  { key: "output-heavy", label: "Output-heavy weighting" },
+  { key: "cache-discounted", label: "Cache-discounted weighting" },
+];
+
+function roundOne(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function hypothesisSignal(row: DeltaRow, key: HypothesisKey): number {
+  switch (key) {
+    case "public-price-cost":
+      return row.deltaCost;
+    case "raw-total-tokens":
+      return row.deltaTotal;
+    case "output-heavy":
+      return row.deltaOutput * 3 + row.deltaInput + row.deltaCacheW * 0.5 + row.deltaCacheR * 0.1;
+    case "cache-discounted":
+      return row.deltaOutput + row.deltaInput + row.deltaCacheW * 0.25 + row.deltaCacheR * 0.1;
+  }
 }
 
 function getGroupLabel(iso: string, scope: ScopeFilter): string {
@@ -241,6 +282,8 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
           deltaCost,
           rawCostPerPct: rawDeltaCost / deltaPct,
           normalizedCostPerPct: deltaCost / deltaPct,
+          predictedDeltaPct: null,
+          residualDeltaPct: null,
           deltaOutput,
           outputPerPct: deltaOutput / deltaPct,
           deltaInput,
@@ -297,6 +340,19 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
       const avgRawCPP = validDelta > 0 ? weightedRawCost / validDelta : 0;
       const avgCPP = validDelta > 0 ? weightedCost / validDelta : 0;
       const avgOPP = validDelta > 0 ? weightedOut / validDelta : 0;
+      const rowsWithPredictions = rows.map((row) => {
+        const predictedDeltaPct =
+          avgCPP > 0 && row.deltaCost > 0 ? row.deltaCost / avgCPP : null;
+        return {
+          ...row,
+          predictedDeltaPct:
+            predictedDeltaPct == null ? null : roundOne(predictedDeltaPct),
+          residualDeltaPct:
+            predictedDeltaPct == null
+              ? null
+              : roundOne(row.deltaPct - predictedDeltaPct),
+        };
+      });
 
       const totals: WeekGroupTotals = {
         totalDeltaPct: totalDelta,
@@ -340,7 +396,7 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
         planShortLabel: planInfo?.shortLabel ?? null,
         planColor: planInfo?.color ?? "var(--text-muted)",
         hasPromoAdjustedPoints,
-        rows,
+        rows: rowsWithPredictions,
         totalDeltaPct: totalDelta,
         avgRawCostPerPct: avgRawCPP,
         avgCostPerPct: avgCPP,
@@ -352,6 +408,44 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
 
     return result.sort((a, b) => b.weekStart.localeCompare(a.weekStart));
   }, [calibrations, minDelta, planPeriods, scope]);
+
+  const hypothesisRanking = useMemo((): HypothesisSummary[] => {
+    const rows = weekGroups
+      .flatMap((week) => week.rows)
+      .filter((row) => row.deltaPct > 0);
+    const observedTotal = rows.reduce((sum, row) => sum + row.deltaPct, 0);
+    if (rows.length === 0 || observedTotal <= 0) return [];
+
+    return HYPOTHESES.map((hypothesis) => {
+      const signalTotal = rows.reduce(
+        (sum, row) => sum + Math.max(0, hypothesisSignal(row, hypothesis.key)),
+        0
+      );
+      const signalPerPct = signalTotal > 0 ? signalTotal / observedTotal : 0;
+      const predictions = rows.map((row) => {
+        const signal = Math.max(0, hypothesisSignal(row, hypothesis.key));
+        const predicted = signalPerPct > 0 ? signal / signalPerPct : 0;
+        return {
+          predicted,
+          residual: row.deltaPct - predicted,
+        };
+      });
+      const predictedDeltaPct = predictions.reduce((sum, p) => sum + p.predicted, 0);
+      const residualPct = observedTotal - predictedDeltaPct;
+      const avgAbsResidualPct =
+        predictions.reduce((sum, p) => sum + Math.abs(p.residual), 0) /
+        predictions.length;
+
+      return {
+        key: hypothesis.key,
+        label: hypothesis.label,
+        predictedDeltaPct: roundOne(predictedDeltaPct),
+        residualPct: roundOne(residualPct),
+        avgAbsResidualPct: roundOne(avgAbsResidualPct),
+        signalPerPct,
+      };
+    }).sort((a, b) => a.avgAbsResidualPct - b.avgAbsResidualPct);
+  }, [weekGroups]);
 
   return (
     <div className="space-y-4">
@@ -407,6 +501,47 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
           </button>
         ))}
       </div>
+
+      {hypothesisRanking.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+          {hypothesisRanking.map((hypothesis, idx) => (
+            <div
+              key={hypothesis.key}
+              className="card p-3 border-l-2"
+              style={{
+                borderLeftColor:
+                  idx === 0 ? "var(--accent-green)" : "var(--border-subtle)",
+              }}
+            >
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[11px] font-semibold text-[var(--text-secondary)]">
+                  {idx + 1}. {hypothesis.label}
+                </span>
+                <span
+                  className={`text-[9px] px-1.5 py-0.5 rounded ${
+                    idx === 0
+                      ? "bg-[var(--accent-green)]/12 text-[var(--accent-green)]"
+                      : "bg-[var(--bg-secondary)] text-[var(--text-muted)]"
+                  }`}
+                >
+                  MAE {hypothesis.avgAbsResidualPct.toFixed(1)} pp
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[10px] text-[var(--text-muted)]">
+                <span>Pred Δ</span>
+                <span className="text-right text-[var(--text-secondary)]">
+                  {hypothesis.predictedDeltaPct.toFixed(1)}%
+                </span>
+                <span>Residual</span>
+                <span className="text-right text-[var(--text-secondary)]">
+                  {hypothesis.residualPct >= 0 ? "+" : ""}
+                  {hypothesis.residualPct.toFixed(1)} pp
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="card p-4 space-y-4">
 
@@ -579,6 +714,13 @@ export function CalibrationDeltaTable({ calibrations, loading, planPeriods = EMP
                               </span>
                             )}
                             {row.fromPct}% → {row.toPct}%
+                            {row.predictedDeltaPct != null && row.residualDeltaPct != null && (
+                              <div className="text-[9px] text-[var(--text-muted)] pl-3">
+                                pred {row.predictedDeltaPct.toFixed(1)}% · resid{" "}
+                                {row.residualDeltaPct >= 0 ? "+" : ""}
+                                {row.residualDeltaPct.toFixed(1)} pp
+                              </div>
+                            )}
                           </td>
                           <td className="py-1 px-1.5 text-right tabular-nums font-medium text-[var(--accent-purple)]">
                             +{row.deltaPct}

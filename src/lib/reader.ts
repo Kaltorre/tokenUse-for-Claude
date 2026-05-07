@@ -7,13 +7,22 @@ import {
   syncUsageStore,
   loadUsageEntriesFromStore,
   getUsageStoreMeta,
+  getUsageStoreDb,
   UsageStoreMeta,
   UsageStoreSyncResult,
 } from "./usage-store";
 
 export type { ProgressCallback, ProgressStep, UsageStoreMeta, UsageStoreSyncResult };
 
-export { getSourcesHash, loadSources, loadSourcesConfig, getUsageStoreMeta, loadUsageEntriesFromStore, syncUsageStore };
+export {
+  getSourcesHash,
+  loadSources,
+  loadSourcesConfig,
+  getUsageStoreMeta,
+  getUsageStoreDb,
+  loadUsageEntriesFromStore,
+  syncUsageStore,
+};
 
 export function readAllUsageData(onProgress?: ProgressCallback): UsageEntry[] {
   return readAllUsageDataFromStore(onProgress);

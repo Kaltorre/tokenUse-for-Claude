@@ -71,12 +71,13 @@ const NAV_ENTRIES: NavEntry[] = [
 ];
 
 function buildSolvedLimits(
-  calibrations: CalibrationPoint[]
+  calibrations: CalibrationPoint[],
+  planPeriods: PlanPeriod[]
 ): Record<CalibrationScope, SolvedLimits> {
   return {
-    "5h": solveLimits(calibrations, "5h"),
-    "weekly-all": solveLimits(calibrations, "weekly-all"),
-    "weekly-sonnet": solveLimits(calibrations, "weekly-sonnet"),
+    "5h": solveLimits(calibrations, "5h", planPeriods),
+    "weekly-all": solveLimits(calibrations, "weekly-all", planPeriods),
+    "weekly-sonnet": solveLimits(calibrations, "weekly-sonnet", planPeriods),
   };
 }
 
@@ -194,8 +195,8 @@ export default function Home() {
 
   // Solve limits whenever calibrations change
   const solvedLimits = useMemo(
-    () => buildSolvedLimits(calibrations),
-    [calibrations]
+    () => buildSolvedLimits(calibrations, planPeriods),
+    [calibrations, planPeriods]
   );
   const hasAnySolvedLimits = useMemo(
     () =>
@@ -225,11 +226,12 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (calibrationsLoading) return;
     if (!hasAnySolvedLimits && limitSourceMode !== "manual") {
       setLimitSourceMode("manual");
       saveLimitSourceMode("manual");
     }
-  }, [hasAnySolvedLimits, limitSourceMode]);
+  }, [hasAnySolvedLimits, limitSourceMode, calibrationsLoading]);
 
   useEffect(() => {
     let cancelled = false;
@@ -557,6 +559,7 @@ export default function Home() {
             solvedLimits={activeSolvedLimits}
             derivedLimits={activeDerivedLimits}
             calibrations={calibrations}
+            sessions={data.sessions}
             planPeriods={planPeriods}
             promoPeriods={promoPeriods}
           />

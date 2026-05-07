@@ -19,7 +19,8 @@ export interface PricingRow {
 
 // Per-version pricing for accurate cost calculation
 const VERSION_PRICING: Record<string, ModelPricing> = {
-  // Opus 4.6 & 4.5 — new lower pricing
+  // Opus 4.7, 4.6 & 4.5 — new lower pricing
+  "opus-4-7":  { input: 5,  output: 25, cache5mWrite: 6.25,  cache1hWrite: 10,   cacheRead: 0.50 },
   "opus-4-6":  { input: 5,  output: 25, cache5mWrite: 6.25,  cache1hWrite: 10,   cacheRead: 0.50 },
   "opus-4-5":  { input: 5,  output: 25, cache5mWrite: 6.25,  cache1hWrite: 10,   cacheRead: 0.50 },
   // Opus 4.1 & 4 — legacy pricing
@@ -37,6 +38,7 @@ const VERSION_PRICING: Record<string, ModelPricing> = {
 
 // Ordered display table for the Pricing tab
 export const PRICING_TABLE: PricingRow[] = [
+  { key: "opus-4-7",    label: "Opus 4.7",    family: "opus",   pricing: VERSION_PRICING["opus-4-7"] },
   { key: "opus-4-6",    label: "Opus 4.6",    family: "opus",   pricing: VERSION_PRICING["opus-4-6"] },
   { key: "opus-4-5",    label: "Opus 4.5",    family: "opus",   pricing: VERSION_PRICING["opus-4-5"] },
   { key: "opus-4-1",    label: "Opus 4.1",    family: "opus",   pricing: VERSION_PRICING["opus-4-1"] },
@@ -51,7 +53,7 @@ export const PRICING_TABLE: PricingRow[] = [
 
 // Fallback family-level pricing (uses latest version pricing)
 const FAMILY_PRICING: Record<string, ModelPricing> = {
-  opus:   VERSION_PRICING["opus-4-6"],
+  opus:   VERSION_PRICING["opus-4-7"],
   sonnet: VERSION_PRICING["sonnet-4-6"],
   haiku:  VERSION_PRICING["haiku-4-5"],
 };

@@ -1,12 +1,26 @@
 import { NextResponse } from "next/server";
 import * as fs from "fs";
 import * as path from "path";
-import { CalibrationPoint, SessionOverrides, UsageEntry, FiveHourWindow, PromoPeriod, ModelTokenBreakdown } from "@/lib/types";
+import { CalibrationPoint, PlanConfig, SessionOverrides, UsageEntry, FiveHourWindow, PromoPeriod, ModelTokenBreakdown } from "@/lib/types";
 import { readAllUsageData } from "@/lib/reader";
 import { readPromos } from "@/lib/promos";
 import { getActivePromoMultiplier, isInPromoRange } from "@/lib/utilization";
 import { buildFiveHourWindows, buildWeeklyBuckets, DEFAULT_WEEKLY_CONFIG, findWeekAnchor } from "@/lib/limits-analyzer";
 import { getModelDisplayName } from "@/lib/pricing";
+import { getPlanTierForDate } from "@/lib/plans";
+
+const PLANS_FILE = path.join(process.cwd(), "data", "plans.json");
+
+function readPlanPeriods(): PlanConfig["periods"] {
+  try {
+    if (!fs.existsSync(PLANS_FILE)) return [];
+    const raw = fs.readFileSync(PLANS_FILE, "utf-8");
+    const parsed = JSON.parse(raw) as PlanConfig;
+    return parsed.periods ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export const dynamic = "force-dynamic";
 
@@ -412,7 +426,8 @@ function createCalibrationPointFromSnapshot(
     scope: CalibrationPoint["scope"];
     observedAt: string;
   },
-  snapshot: CalibrationSnapshot | null
+  snapshot: CalibrationSnapshot | null,
+  planPeriods: PlanConfig["periods"]
 ): CalibrationPoint {
   const zeroTokens = { output: 0, input: 0, cacheWrite: 0, cacheRead: 0, total: 0 };
   const zeroNormalized = {
@@ -439,6 +454,11 @@ function createCalibrationPointFromSnapshot(
     ).toISOString();
   }
 
+  const tierAt = (windowStart: string | null) =>
+    planPeriods.length > 0
+      ? getPlanTierForDate(windowStart ?? input.observedAt, planPeriods) ?? undefined
+      : undefined;
+
   return snapshot
     ? {
         id: `cal_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -451,6 +471,7 @@ function createCalibrationPointFromSnapshot(
         windowId: snapshotWindowId(snapshot),
         windowStart: snapshot.windowStart,
         peakStatus: snapshot.peakStatus as CalibrationPoint["peakStatus"],
+        planTier: tierAt(snapshot.windowStart),
         modelBreakdown: snapshot.modelBreakdown,
         agentBreakdown: snapshot.agentBreakdown,
       }
@@ -465,6 +486,7 @@ function createCalibrationPointFromSnapshot(
         windowId: null,
         windowStart: zeroWindowStart,
         peakStatus: "peak" as CalibrationPoint["peakStatus"],
+        planTier: tierAt(zeroWindowStart),
         modelBreakdown: {},
         agentBreakdown: {},
       };
@@ -654,6 +676,7 @@ export async function POST(request: Request) {
 
     const preloadedEntries = readAllUsageData();
     const existing = readCalibrations();
+    const planPeriods = readPlanPeriods();
     const created: CalibrationPoint[] = [];
 
     for (const input of inputs) {
@@ -662,7 +685,7 @@ export async function POST(request: Request) {
         input.observedAt,
         preloadedEntries
       );
-      const point = createCalibrationPointFromSnapshot(input, snapshot);
+      const point = createCalibrationPointFromSnapshot(input, snapshot, planPeriods);
       existing.push(point);
       created.push(point);
     }

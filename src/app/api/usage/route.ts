@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
 import { analyzeUsage } from "@/lib/analyzer";
-import { loadUsageEntriesFromStore, syncUsageStore } from "@/lib/reader";
+import {
+  getUsageStoreDb,
+  loadUsageEntriesFromStore,
+  syncUsageStore,
+} from "@/lib/reader";
 import { readPromos } from "@/lib/promos";
 import { UsageData } from "@/lib/types";
-import { getUsageCacheContext, loadAnalyzedUsageCache, saveAnalyzedUsageCache } from "@/lib/usage-data-cache";
+import { getUsageCacheContext } from "@/lib/usage-data-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -27,22 +31,14 @@ export async function GET() {
       return NextResponse.json(memCache.data);
     }
 
-    const diskCached = loadAnalyzedUsageCache(syncResult.meta);
-    if (diskCached) {
-      memCache = {
-        data: diskCached,
-        time: now,
-        revision: cacheContext.storeRevision,
-        promosMtimeMs: cacheContext.promosMtimeMs,
-      };
-      return NextResponse.json(diskCached);
-    }
-
     const t0 = Date.now();
+    const db = getUsageStoreDb();
     const entries = loadUsageEntriesFromStore();
     const promos = readPromos();
-    const data = analyzeUsage(entries, promos);
-    console.log(`[api/usage] Analyzed ${entries.length} entries in ${Date.now() - t0}ms`);
+    const data = analyzeUsage(db, entries, promos);
+    console.log(
+      `[api/usage] Analyzed ${entries.length} entries in ${Date.now() - t0}ms`
+    );
 
     memCache = {
       data,
@@ -50,7 +46,6 @@ export async function GET() {
       revision: cacheContext.storeRevision,
       promosMtimeMs: cacheContext.promosMtimeMs,
     };
-    saveAnalyzedUsageCache(data, syncResult.meta);
 
     return NextResponse.json(data);
   } catch (error) {

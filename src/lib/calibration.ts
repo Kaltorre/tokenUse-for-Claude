@@ -9,9 +9,28 @@ import {
   AnomalyFlag,
   PlanPeriod,
   PlanTier,
+  PLAN_TIERS,
 } from "./types";
 import { getActivePromoMultiplier, isInPromoRange, normalizeUsageToBase, PromoNormalizationMode } from "./utilization";
 import { getPlanTierForDate } from "./plans";
+
+const MAX20_MULTIPLIER = PLAN_TIERS.max20.multiplier;
+
+/**
+ * Scale a per-plan value (cost or token count) to the max20 baseline.
+ * Calibration data is captured under whichever plan was active at that time;
+ * normalising to max20 lets the solver mix points from different plans, and
+ * lets `calibratedPlanLimits` (which divides by 20) project to any tier.
+ *
+ * Legacy points without `planTier` are assumed to already be on max20 — keeps
+ * pre-tag historical data interpretable until backfill runs.
+ */
+function scaleToMax20(value: number, planTier: PlanTier | undefined): number {
+  if (planTier == null) return value;
+  const tierMult = PLAN_TIERS[planTier].multiplier;
+  if (tierMult <= 0) return value;
+  return value * (MAX20_MULTIPLIER / tierMult);
+}
 
 const STORAGE_KEY = "claude-usage-calibrations";
 
@@ -310,7 +329,8 @@ export function buildCalibrationPoint(
   scope: CalibrationScope,
   window: FiveHourWindow | null,
   weekBucket: WeeklyBucket | null,
-  promos: PromoPeriod[] = []
+  promos: PromoPeriod[] = [],
+  planPeriods: PlanPeriod[] = []
 ): CalibrationPoint | null {
   const source = scope === "5h" ? window : weekBucket;
   if (!source) return null;
@@ -338,6 +358,11 @@ export function buildCalibrationPoint(
     promos
   );
 
+  const planTier =
+    planPeriods.length > 0
+      ? getPlanTierForDate(windowStart, planPeriods) ?? undefined
+      : undefined;
+
   return {
     id: genId(),
     timestamp: new Date().toISOString(),
@@ -355,6 +380,7 @@ export function buildCalibrationPoint(
     windowId: scope === "5h" && window ? window.id : null,
     windowStart,
     peakStatus,
+    planTier,
   };
 }
 
@@ -378,11 +404,16 @@ function solveDirectMethod(points: CalibrationPoint[]): SolvedLimits["methods"][
     const pct = p.reportedPct / 100;
     if (pct <= 0) continue;
 
+    // Scale to max20 baseline so points from different plans can be mixed
+    const out = scaleToMax20(normalized.output, p.planTier);
+    const inp = scaleToMax20(normalized.input, p.planTier);
+    const tot = scaleToMax20(normalized.total, p.planTier);
+
     // Each dimension could be the bottleneck
     // Base limit = normalized usage / pct
-    outputLimits.push(normalized.output / pct);
-    ioLimits.push((normalized.input + normalized.output) / pct);
-    totalLimits.push(normalized.total / pct);
+    outputLimits.push(out / pct);
+    ioLimits.push((inp + out) / pct);
+    totalLimits.push(tot / pct);
   }
 
   if (outputLimits.length === 0) return null;
@@ -420,7 +451,8 @@ function solveCostMethod(points: CalibrationPoint[]): SolvedLimits["methods"][0]
     const normalized = getNormalizedPointUsage(p);
     if (!normalized) continue;
     const pct = p.reportedPct / 100;
-    costLimits.push(normalized.cost / pct);
+    const scaledCost = scaleToMax20(normalized.cost, p.planTier);
+    costLimits.push(scaledCost / pct);
   }
 
   if (costLimits.length === 0) return null;
@@ -428,6 +460,7 @@ function solveCostMethod(points: CalibrationPoint[]): SolvedLimits["methods"][0]
   const costLimit = medianOf(costLimits);
 
   // Derive token limits from cost limit using average token/cost ratios
+  // (ratios are plan-invariant since both numerator and denominator scale equally)
   let totalOutput = 0, totalIO = 0, totalAll = 0, totalCost = 0;
   for (const p of validPoints) {
     const normalized = getNormalizedPointUsage(p);
@@ -480,16 +513,21 @@ function solveWeightedMethod(points: CalibrationPoint[]): {
     cacheRead: 0.3 / 15, // cacheRead/output
   };
 
-  // Calculate "effective tokens" for each point using price ratios
+  // Calculate "effective tokens" for each point using price ratios.
+  // Tokens are scaled to max20 baseline so points from different plans share a frame.
   const effectiveTokens = points.map((p) => ({
     effective: (() => {
       const normalized = getNormalizedPointUsage(p);
       if (!normalized) return 0;
+      const out = scaleToMax20(normalized.output, p.planTier);
+      const inp = scaleToMax20(normalized.input, p.planTier);
+      const cw = scaleToMax20(normalized.cacheWrite, p.planTier);
+      const cr = scaleToMax20(normalized.cacheRead, p.planTier);
       return (
-        normalized.output * priceRatios.output +
-        normalized.input * priceRatios.input +
-        normalized.cacheWrite * priceRatios.cacheWrite +
-        normalized.cacheRead * priceRatios.cacheRead
+        out * priceRatios.output +
+        inp * priceRatios.input +
+        cw * priceRatios.cacheWrite +
+        cr * priceRatios.cacheRead
       );
     })(),
     pct: p.reportedPct / 100,
@@ -687,15 +725,29 @@ export function detectAnomalies(
  */
 export function solveLimits(
   allPoints: CalibrationPoint[],
-  scope: CalibrationScope
+  scope: CalibrationScope,
+  planPeriods: PlanPeriod[] = []
 ): SolvedLimits {
   // Filter to points that have complete data (screenshot-sourced entries may lack tokens)
-  const points = allPoints.filter(
-    (p) =>
-      p.scope === scope &&
-      p.tokens != null &&
-      p.anomalyFlag?.status !== 'excluded'
-  );
+  // and backfill planTier from planPeriods so the solver can scale to max20 baseline.
+  const points = allPoints
+    .filter(
+      (p) =>
+        p.scope === scope &&
+        p.tokens != null &&
+        p.anomalyFlag?.status !== 'excluded'
+    )
+    .map((p) =>
+      p.planTier
+        ? p
+        : {
+            ...p,
+            planTier:
+              planPeriods.length > 0
+                ? getPlanTierForDate(p.windowStart ?? p.timestamp, planPeriods) ?? undefined
+                : undefined,
+          }
+    );
 
   const methods: SolvedLimits["methods"] = [];
   let weights: SolvedLimits["weights"] = null;

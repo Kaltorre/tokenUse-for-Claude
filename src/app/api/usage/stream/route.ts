@@ -1,4 +1,5 @@
 import {
+  getUsageStoreDb,
   loadUsageEntriesFromStore,
   ProgressCallback,
   ProgressStep,
@@ -6,7 +7,6 @@ import {
 } from "@/lib/reader";
 import { analyzeUsage } from "@/lib/analyzer";
 import { readPromos } from "@/lib/promos";
-import { loadAnalyzedUsageCache, saveAnalyzedUsageCache } from "@/lib/usage-data-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -24,13 +24,9 @@ export async function GET() {
           send("progress", { step, message, current, total });
         };
 
-        const syncResult = syncUsageStore(onProgress);
-        const cached = loadAnalyzedUsageCache(syncResult.meta);
-        if (cached) {
-          send("done", cached);
-          return;
-        }
+        syncUsageStore(onProgress);
 
+        const db = getUsageStoreDb();
         const entries = loadUsageEntriesFromStore();
 
         send("progress", {
@@ -40,7 +36,7 @@ export async function GET() {
           total: 9,
         });
         const promos = readPromos();
-        const data = analyzeUsage(entries, promos, (message, current, total) => {
+        const data = analyzeUsage(db, entries, promos, (message, current, total) => {
           send("progress", {
             step: "analyze" satisfies ProgressStep,
             message,
@@ -49,7 +45,6 @@ export async function GET() {
           });
         });
 
-        saveAnalyzedUsageCache(data, syncResult.meta);
         send("done", data);
       } catch (e) {
         send("error", { message: e instanceof Error ? e.message : "Unknown error" });

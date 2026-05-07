@@ -98,9 +98,28 @@ declare global {
   var __usageStoreWatchState: UsageStoreWatchState | undefined;
 }
 
+const LEGACY_CACHE_FILES = ["usage-cache.json", "cache-meta.json"];
+
 function ensureCacheDir() {
   if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+}
+
+let legacyCleanupDone = false;
+
+function cleanupLegacyCacheFiles() {
+  if (legacyCleanupDone) return;
+  legacyCleanupDone = true;
+  for (const name of LEGACY_CACHE_FILES) {
+    const target = path.join(CACHE_DIR, name);
+    try {
+      if (fs.existsSync(target)) {
+        fs.unlinkSync(target);
+      }
+    } catch {
+      // Ignore — best-effort cleanup of stale pre-SQLite cache files.
+    }
   }
 }
 
@@ -185,9 +204,14 @@ function ensureSourceWatchers(sourceDirs: SourceDir[], sourcesKey: string): Usag
   return state;
 }
 
+export function getUsageStoreDb(): DatabaseSync {
+  return getDb();
+}
+
 function getDb(): DatabaseSync {
   if (!globalThis.__usageStoreDb) {
     ensureCacheDir();
+    cleanupLegacyCacheFiles();
 
     const db = new DatabaseSync(DB_FILE);
     db.exec(`
@@ -771,6 +795,7 @@ function buildTargetedScan(changedPaths: Set<string>, sourceDirs: SourceDir[]): 
 
 export function syncUsageStore(onProgress?: ProgressCallback): UsageStoreSyncResult {
   const progress = onProgress ?? (() => {});
+  cleanupLegacyCacheFiles();
   const now = Date.now();
   const lastSync = globalThis.__usageStoreLastSync;
 

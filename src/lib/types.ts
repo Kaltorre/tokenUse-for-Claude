@@ -32,7 +32,6 @@ export interface SessionStats {
   totalCost: number;
   messageCount: number;
   models: Record<string, number>;
-  entries: UsageEntry[];
 }
 
 export interface DailyStats {
@@ -260,6 +259,7 @@ export interface Utilization {
 // --- Calibration System ---
 
 export type CalibrationScope = "5h" | "weekly-all" | "weekly-sonnet";
+export type LimitWindowType = "5h" | "weekly";
 
 export type AnomalyTag =
   | 'data-entry-error'
@@ -305,6 +305,14 @@ export interface CalibrationPoint {
   windowStart: string | null;
   /** Peak/promo context */
   peakStatus: PeakStatus;
+  /**
+   * Plan tier active when this point was captured. Used by the solver to
+   * scale `cost` / tokens to the max20 baseline so a single solved limit
+   * works for every plan via `calibratedPlanLimits` (which divides by 20).
+   * Undefined = legacy point without recorded tier — treated as max20 to
+   * preserve historical behavior.
+   */
+  planTier?: PlanTier;
   anomalyFlag?: AnomalyFlag;
   /** Per-model token/cost breakdown at snapshot time */
   modelBreakdown?: Record<string, ModelTokenBreakdown>;
@@ -353,6 +361,11 @@ export interface PlanPeriod {
   tier: PlanTier;
   startDate: string;   // ISO 8601
   endDate: string | null; // null = current/ongoing
+  displayName?: string;
+  /** Optional hypothesis override relative to Pro = 1x. Defaults to PLAN_TIERS[tier].multiplier. */
+  theoreticalMultiplier?: number;
+  /** Optional per-window hypothesis override when 5h and weekly do not scale the same way. */
+  theoreticalMultipliers?: Partial<Record<LimitWindowType, number>>;
   note?: string;
 }
 
