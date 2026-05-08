@@ -26,7 +26,15 @@ type UsageSnapshot = {
 
 export interface LimitInsight {
   estimatedPct: number | null;
+  outputPct: number | null;
+  inoutPct: number | null;
+  totalPct: number | null;
+  costPct: number | null;
   noPromoPct: number | null;
+  noPromoOutputPct: number | null;
+  noPromoInoutPct: number | null;
+  noPromoTotalPct: number | null;
+  noPromoCostPct: number | null;
   observedPct: number | null;
   deltaPct: number | null;
   bottleneck: Bottleneck | null;
@@ -66,7 +74,15 @@ export function computeLimitInsight({
   const solved = solvedLimits?.[scope];
 
   let estimatedPct: number | null = null;
+  let outputPct: number | null = null;
+  let inoutPct: number | null = null;
+  let totalPct: number | null = null;
+  let costPct: number | null = null;
   let noPromoPct: number | null = null;
+  let noPromoOutputPct: number | null = null;
+  let noPromoInoutPct: number | null = null;
+  let noPromoTotalPct: number | null = null;
+  let noPromoCostPct: number | null = null;
   let bottleneck: Bottleneck | null = null;
   let noPromoBottleneck: Bottleneck | null = null;
   let confidence: number | null = null;
@@ -111,7 +127,15 @@ export function computeLimitInsight({
     );
 
     estimatedPct = estimated?.estimatedPct ?? null;
+    outputPct = estimated?.outputPct ?? null;
+    inoutPct = estimated?.ioPct ?? null;
+    totalPct = estimated?.totalPct ?? null;
+    costPct = estimated?.costPct ?? null;
     noPromoPct = noPromo?.estimatedPct ?? estimatedPct;
+    noPromoOutputPct = noPromo?.outputPct ?? outputPct;
+    noPromoInoutPct = noPromo?.ioPct ?? inoutPct;
+    noPromoTotalPct = noPromo?.totalPct ?? totalPct;
+    noPromoCostPct = noPromo?.costPct ?? costPct;
     bottleneck = estimated?.bottleneck ?? null;
     noPromoBottleneck = noPromo?.bottleneck ?? bottleneck;
     confidence = estimated?.confidence ?? noPromo?.confidence ?? solved.best.confidence;
@@ -149,7 +173,15 @@ export function computeLimitInsight({
     );
 
     estimatedPct = estimated?.effectivePct ?? null;
+    outputPct = estimated?.outputPct ?? null;
+    inoutPct = estimated?.inoutPct ?? null;
+    totalPct = estimated?.totalPct ?? null;
+    costPct = estimated?.costPct ?? null;
     noPromoPct = noPromo?.effectivePct ?? estimatedPct;
+    noPromoOutputPct = noPromo?.outputPct ?? outputPct;
+    noPromoInoutPct = noPromo?.inoutPct ?? inoutPct;
+    noPromoTotalPct = noPromo?.totalPct ?? totalPct;
+    noPromoCostPct = noPromo?.costPct ?? costPct;
     bottleneck = estimated?.bottleneck ?? null;
     noPromoBottleneck = noPromo?.bottleneck ?? bottleneck;
   }
@@ -171,7 +203,15 @@ export function computeLimitInsight({
 
   return {
     estimatedPct: roundPct(estimatedPct),
+    outputPct: roundPct(outputPct),
+    inoutPct: roundPct(inoutPct),
+    totalPct: roundPct(totalPct),
+    costPct: roundPct(costPct),
     noPromoPct: promoActive ? roundPct(noPromoPct) : null,
+    noPromoOutputPct: promoActive ? roundPct(noPromoOutputPct) : null,
+    noPromoInoutPct: promoActive ? roundPct(noPromoInoutPct) : null,
+    noPromoTotalPct: promoActive ? roundPct(noPromoTotalPct) : null,
+    noPromoCostPct: promoActive ? roundPct(noPromoCostPct) : null,
     observedPct: roundPct(observedPct),
     deltaPct,
     bottleneck,

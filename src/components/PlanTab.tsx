@@ -13,6 +13,7 @@ import {
   LimitsData,
   PromoPeriod,
   getDefaultLimits,
+  LimitWindowType,
 } from "@/lib/types";
 import { formatTokens, formatCost, formatDate } from "@/lib/format";
 import { findCalibrationAnchor, findCalibrationSeries } from "@/lib/calibration";
@@ -42,6 +43,13 @@ function PlanDialog({ initial, onSave, onClose }: PlanDialogProps) {
   const [tier, setTier] = useState<PlanTier>(initial?.tier ?? "max20");
   const [startDate, setStartDate] = useState(initial ? toDateInput(initial.startDate) : "");
   const [endDate, setEndDate] = useState(initial?.endDate ? toDateInput(initial.endDate) : "");
+  const [displayName, setDisplayName] = useState(initial?.displayName ?? "");
+  const [fiveHMultiplier, setFiveHMultiplier] = useState(
+    initial?.theoreticalMultipliers?.["5h"]?.toString() ?? ""
+  );
+  const [weeklyMultiplier, setWeeklyMultiplier] = useState(
+    initial?.theoreticalMultipliers?.weekly?.toString() ?? ""
+  );
   const [note, setNote] = useState(initial?.note ?? "");
 
   useEffect(() => {
@@ -51,11 +59,20 @@ function PlanDialog({ initial, onSave, onClose }: PlanDialogProps) {
 
   const handleSave = () => {
     if (!startDate) return;
+    const theoreticalMultipliers: Partial<Record<LimitWindowType, number>> = {};
+    const fiveH = parseFloat(fiveHMultiplier);
+    const weekly = parseFloat(weeklyMultiplier);
+    if (Number.isFinite(fiveH) && fiveH > 0) theoreticalMultipliers["5h"] = fiveH;
+    if (Number.isFinite(weekly) && weekly > 0) theoreticalMultipliers.weekly = weekly;
+
     onSave({
       id: initial?.id,
       tier,
       startDate: fromDateInput(startDate),
       endDate: endDate ? fromDateInput(endDate) : null,
+      displayName: displayName || undefined,
+      theoreticalMultipliers:
+        Object.keys(theoreticalMultipliers).length > 0 ? theoreticalMultipliers : undefined,
       note: note || undefined,
     });
     onClose();
@@ -122,6 +139,58 @@ function PlanDialog({ initial, onSave, onClose }: PlanDialogProps) {
                 className="w-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-blue)] transition-colors"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] mb-1">
+              Label <span className="opacity-50">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="e.g. Max100 5h boost"
+              className="w-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-blue)] transition-colors"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] mb-1.5">
+              Limit multipliers <span className="opacity-50">(relative to Pro = 1x)</span>
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <span className="block text-[10px] text-[var(--text-muted)] mb-1">
+                  5h override
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={fiveHMultiplier}
+                  onChange={(e) => setFiveHMultiplier(e.target.value)}
+                  placeholder={`${PLAN_TIERS[tier].multiplier}`}
+                  className="w-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-blue)] transition-colors"
+                />
+              </div>
+              <div>
+                <span className="block text-[10px] text-[var(--text-muted)] mb-1">
+                  Weekly override
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={weeklyMultiplier}
+                  onChange={(e) => setWeeklyMultiplier(e.target.value)}
+                  placeholder={`${PLAN_TIERS[tier].multiplier}`}
+                  className="w-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-blue)] transition-colors"
+                />
+              </div>
+            </div>
+            <p className="mt-1.5 text-[10px] text-[var(--text-muted)]">
+              Example: Max $100 has default 5x. If only 5h doubled, set 5h = 10 and leave Weekly empty.
+            </p>
           </div>
 
           {/* Note */}
@@ -205,9 +274,10 @@ function PlanTimeline({ periods, onEdit, onDelete }: PlanTimelineProps) {
               {currentPlan.note && <span className="ml-2 opacity-70">· {currentPlan.note}</span>}
             </div>
             <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
-              {currentTierInfo.multiplier === 1
-                ? "Reference tier (100% Max $200)"
-                : `${(currentTierInfo.multiplier * 100).toFixed(0)}% limitów Max $200`}
+              {formatPeriodMultipliers(currentPlan) ??
+                (currentTierInfo.multiplier === 1
+                  ? "Reference tier (100% Max $200)"
+                  : `${(currentTierInfo.multiplier * 100).toFixed(0)}% limitów Pro`)}
             </div>
           </div>
         </div>
@@ -273,6 +343,11 @@ function PlanTimeline({ periods, onEdit, onDelete }: PlanTimelineProps) {
                       {p.endDate ? formatDate(p.endDate) : <span className="text-[var(--accent-green)]">ongoing</span>}
                       {p.note && <span className="ml-2 opacity-60">· {p.note}</span>}
                     </div>
+                    {formatPeriodMultipliers(p) && (
+                      <div className="text-[10px] text-[var(--accent-orange)] mt-0.5 tabular-nums">
+                        {formatPeriodMultipliers(p)}
+                      </div>
+                    )}
                   </div>
 
                   {/* Price */}
@@ -325,6 +400,19 @@ function weekEndDate(weekStart: string): string {
   const d = new Date(weekStart);
   d.setUTCDate(d.getUTCDate() + 6);
   return d.toISOString();
+}
+
+function periodHasCustomWindowMultiplier(period: PlanPeriod): boolean {
+  return Object.values(period.theoreticalMultipliers ?? {}).some(
+    (value) => value != null && Number.isFinite(value)
+  );
+}
+
+function formatPeriodMultipliers(period: PlanPeriod): string | null {
+  if (!periodHasCustomWindowMultiplier(period)) return null;
+  const fiveH = period.theoreticalMultipliers?.["5h"] ?? PLAN_TIERS[period.tier].multiplier;
+  const weekly = period.theoreticalMultipliers?.weekly ?? PLAN_TIERS[period.tier].multiplier;
+  return `5h ${fiveH}x / weekly ${weekly}x`;
 }
 
 function WeeklyPlanChart({ weeklyAll, periods, solvedLimits, promoPeriods = [], calibrations = [] }: WeeklyPlanChartProps) {

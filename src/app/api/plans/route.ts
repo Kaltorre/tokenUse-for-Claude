@@ -45,6 +45,9 @@ export async function POST(request: Request) {
       tier: body.tier,
       startDate: body.startDate,
       endDate: body.endDate ?? null,
+      displayName: body.displayName,
+      theoreticalMultiplier: body.theoreticalMultiplier,
+      theoreticalMultipliers: body.theoreticalMultipliers,
       note: body.note,
     };
 

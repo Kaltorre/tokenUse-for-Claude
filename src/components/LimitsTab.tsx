@@ -17,8 +17,9 @@ import {
   PromoPeriod,
   DEFAULT_LIMITS_5H,
   DEFAULT_LIMITS_WEEKLY,
+  Bottleneck,
 } from "@/lib/types";
-import { getPlanTierForDate, weekKeyFromDate } from "@/lib/plans";
+import { getPlanForDate, weekKeyFromDate } from "@/lib/plans";
 import { formatTokens, formatCost } from "@/lib/format";
 import {
   estimateUtilization,
@@ -26,7 +27,7 @@ import {
   findCalibrationAnchor,
   findCalibrationSeries,
 } from "@/lib/calibration";
-import { computeLimitInsight } from "@/lib/limit-insights";
+import { computeLimitInsight, type LimitInsight } from "@/lib/limit-insights";
 import {
   calcUtilization,
   getActivePromoMultiplier,
@@ -40,12 +41,14 @@ import {
   buildUtilizationResidual,
   buildLimitRegimeEvidence,
   estimatePctFromCostProxy,
+  getWindowTheoreticalMultiplier,
 } from "@/lib/limit-regimes";
 import {
   Bar,
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -155,14 +158,17 @@ function hasSolvedScopeLimits(
 }
 
 function getDisplayPlanMultiplier(
-  planTier: PlanPeriod["tier"] | null,
+  plan: PlanPeriod | PlanPeriod["tier"] | null,
   solvedLimits: Record<CalibrationScope, SolvedLimits> | null,
   scope: CalibrationScope
 ): number {
-  const tierMultiplier = PLAN_TIERS[planTier ?? "max20"].multiplier;
+  const theoreticalMultiplier =
+    plan && typeof plan === "object"
+      ? getWindowTheoreticalMultiplier(plan, scope === "5h" ? "5h" : "weekly")
+      : PLAN_TIERS[plan ?? "max20"].multiplier;
   return hasSolvedScopeLimits(solvedLimits, scope)
-    ? tierMultiplier / PLAN_TIERS.max20.multiplier
-    : tierMultiplier;
+    ? theoreticalMultiplier / PLAN_TIERS.max20.multiplier
+    : theoreticalMultiplier;
 }
 
 type WeeklyOverrideScope = "all" | "sonnet";
@@ -245,6 +251,33 @@ function LimitRegimeEvidencePanel({
     .filter((point) => point.estimatedPct != null)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
     .slice(-80);
+  const regimeMarkers = planPeriods
+    .filter(
+      (period) =>
+        period.displayName ||
+        period.note ||
+        Object.keys(period.theoreticalMultipliers ?? {}).length > 0
+    )
+    .map((period) => {
+      const markerPoint = chartPoints.find(
+        (point) => new Date(point.timestamp).getTime() >= new Date(period.startDate).getTime()
+      );
+      if (!markerPoint) return null;
+      const fiveH = period.theoreticalMultipliers?.["5h"];
+      const weekly = period.theoreticalMultipliers?.weekly;
+      const labelParts = [
+        period.displayName ?? PLAN_TIERS[period.tier].shortLabel,
+        fiveH ? `5h ${fiveH}x` : null,
+        weekly ? `wk ${weekly}x` : null,
+      ].filter(Boolean);
+      return {
+        id: period.id,
+        time: markerPoint.time,
+        label: labelParts.join(" · "),
+        color: PLAN_TIERS[period.tier].color,
+      };
+    })
+    .filter((marker): marker is { id: string; time: string; label: string; color: string } => marker != null);
 
   return (
     <div className="card p-5 space-y-4">
@@ -459,6 +492,22 @@ function LimitRegimeEvidencePanel({
                   radius={[3, 3, 0, 0]}
                   name="Delta"
                 />
+                {regimeMarkers.map((marker) => (
+                  <ReferenceLine
+                    key={marker.id}
+                    yAxisId="pct"
+                    x={marker.time}
+                    stroke={marker.color}
+                    strokeDasharray="4 3"
+                    ifOverflow="extendDomain"
+                    label={{
+                      value: marker.label,
+                      fill: marker.color,
+                      fontSize: 10,
+                      position: "insideTopRight",
+                    }}
+                  />
+                ))}
                 <Line
                   yAxisId="pct"
                   type="monotone"
@@ -967,18 +1016,18 @@ function StatusCards({
       });
     };
 
-  const currentWindowPlanTier = currentWindow && planPeriods
-    ? getPlanTierForDate(currentWindow.startTime, planPeriods)
+  const currentWindowPlan = currentWindow
+    ? getPlanForDate(currentWindow.startTime, planPeriods)
     : null;
-  const currentWeekPlanTier = currentWeekAll && planPeriods
-    ? getPlanTierForDate(currentWeekAll.weekStart, planPeriods)
+  const currentWeekPlan = currentWeekAll
+    ? getPlanForDate(currentWeekAll.weekStart, planPeriods)
     : null;
-  const currentWeekSonnetPlanTier = currentWeekSonnet && planPeriods
-    ? getPlanTierForDate(currentWeekSonnet.weekStart, planPeriods)
+  const currentWeekSonnetPlan = currentWeekSonnet
+    ? getPlanForDate(currentWeekSonnet.weekStart, planPeriods)
     : null;
-  const currentWindowPlanMult = getDisplayPlanMultiplier(currentWindowPlanTier, solvedLimits, "5h");
-  const currentWeekPlanMult = getDisplayPlanMultiplier(currentWeekPlanTier, solvedLimits, "weekly-all");
-  const currentWeekSonnetPlanMult = getDisplayPlanMultiplier(currentWeekSonnetPlanTier, solvedLimits, "weekly-sonnet");
+  const currentWindowPlanMult = getDisplayPlanMultiplier(currentWindowPlan, solvedLimits, "5h");
+  const currentWeekPlanMult = getDisplayPlanMultiplier(currentWeekPlan, solvedLimits, "weekly-all");
+  const currentWeekSonnetPlanMult = getDisplayPlanMultiplier(currentWeekSonnetPlan, solvedLimits, "weekly-sonnet");
   const currentWindowAnchor = currentWindow
     ? findCalibrationAnchor(calibrations, "5h", currentWindow.startTime)
     : undefined;
@@ -1335,14 +1384,14 @@ function SessionPressurePanel({
   promoPeriods = EMPTY_PROMO_PERIODS,
 }: SessionPressurePanelProps) {
   const currentWindowIds = new Set(currentWindow?.sessionIds ?? []);
-  const windowPlanTier = currentWindow
-    ? getPlanTierForDate(currentWindow.startTime, planPeriods)
+  const windowPlan = currentWindow
+    ? getPlanForDate(currentWindow.startTime, planPeriods)
     : null;
-  const weekPlanTier = currentWeekAll
-    ? getPlanTierForDate(currentWeekAll.weekStart, planPeriods)
+  const weekPlan = currentWeekAll
+    ? getPlanForDate(currentWeekAll.weekStart, planPeriods)
     : null;
-  const windowPlanMult = getDisplayPlanMultiplier(windowPlanTier, solvedLimits, "5h");
-  const weekPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "weekly-all");
+  const windowPlanMult = getDisplayPlanMultiplier(windowPlan, solvedLimits, "5h");
+  const weekPlanMult = getDisplayPlanMultiplier(weekPlan, solvedLimits, "weekly-all");
   const currentWindowAnchor = currentWindow
     ? findCalibrationAnchor(calibrations, "5h", currentWindow.startTime)
     : undefined;
@@ -1793,7 +1842,25 @@ function FiveHourAccordion({ windows, solvedLimits, derivedLimits, overrides, on
 
 // ─── WeeklyWindowsView — weekly accordion (open by default) with 5h progress bars ──
 
-type ViewMode = "output" | "total";
+type ViewMode = "output" | "total" | "cost";
+
+function viewModeBottleneck(viewMode: ViewMode): Bottleneck {
+  if (viewMode === "output") return "output";
+  if (viewMode === "total") return "total";
+  return "cost";
+}
+
+function viewModePct(insight: LimitInsight, viewMode: ViewMode): number | null {
+  if (viewMode === "output") return insight.outputPct;
+  if (viewMode === "total") return insight.totalPct;
+  return insight.costPct;
+}
+
+function viewModeNoPromoPct(insight: LimitInsight, viewMode: ViewMode): number | null {
+  if (viewMode === "output") return insight.noPromoOutputPct;
+  if (viewMode === "total") return insight.noPromoTotalPct;
+  return insight.noPromoCostPct;
+}
 
 interface WindowRowProps {
   win: FiveHourWindow;
@@ -1852,27 +1919,43 @@ function WindowRow({
     observedPoint: calibrationPoint,
   });
 
-  // Compute utilization
-  let displayPct: number | null = insight.estimatedPct;
-  let bottleneckColor = "var(--accent-blue)";
-  let bottleneckLabel = "";
+  // Compute utilization for the selected tab. The overall bottleneck is shown in
+  // expanded details; the row itself should match Output/Total/Kwota.
+  const displayMetric = viewModeBottleneck(viewMode);
+  let displayPct: number | null = viewModePct(insight, viewMode);
+  let displayColor =
+    BOTTLENECK_COLORS[displayMetric as keyof typeof BOTTLENECK_COLORS] ??
+    "var(--accent-blue)";
+  let displayLabel =
+    BOTTLENECK_LABELS[displayMetric as keyof typeof BOTTLENECK_LABELS] ?? "";
   const isCalibrated = !!calibrationPoint;
-  const basePct = insight.noPromoPct;
+  const basePct = viewModeNoPromoPct(insight, viewMode);
 
-  if (insight.bottleneck) {
-    bottleneckColor =
+  if (displayPct == null && insight.bottleneck) {
+    displayPct = insight.estimatedPct;
+    displayColor =
       BOTTLENECK_COLORS[insight.bottleneck as keyof typeof BOTTLENECK_COLORS] ??
-      "var(--accent-blue)";
-    bottleneckLabel =
-      BOTTLENECK_LABELS[insight.bottleneck as keyof typeof BOTTLENECK_LABELS] ?? "";
+      displayColor;
+    displayLabel =
+      BOTTLENECK_LABELS[insight.bottleneck as keyof typeof BOTTLENECK_LABELS] ??
+      displayLabel;
   }
 
-  const tokens = viewMode === "output" ? win.outputTokens : win.totalTokens;
+  const displayValue =
+    viewMode === "output"
+      ? win.outputTokens
+      : viewMode === "total"
+      ? win.totalTokens
+      : win.totalCost;
+  const primaryValue = viewMode === "cost" ? formatCost(win.totalCost) : formatTokens(displayValue);
+  const secondaryValue = viewMode === "cost" ? formatTokens(win.totalTokens) : formatCost(win.totalCost);
   const barWidth = displayPct !== null
     ? Math.min(displayPct, 100)
-    : (tokens / maxTokens) * 100;
+    : (displayValue / maxTokens) * 100;
 
-  const barColor = win.status === "active"
+  const barColor = viewMode === "cost"
+    ? displayColor
+    : win.status === "active"
     ? "var(--accent-green)"
     : win.peakStatus === "peak"
     ? "var(--accent-red)"
@@ -1893,7 +1976,7 @@ function WindowRow({
 
           {/* Progress bar */}
           <div className="flex-1 h-5 bg-[var(--bg-primary)] rounded overflow-hidden relative">
-            {insight.promoActive && displayPct !== null && basePct !== null ? (
+            {displayPct !== null && basePct !== null && basePct - displayPct > 0.05 ? (
               <>
                 <div
                   className="absolute inset-y-0 left-0 rounded-l transition-all duration-300"
@@ -1921,10 +2004,10 @@ function WindowRow({
           {displayPct !== null ? (
             <span
               className="w-32 text-right text-[11px] tabular-nums shrink-0 font-medium"
-              style={{ color: bottleneckColor }}
+              style={{ color: displayColor }}
             >
               {isCalibrated && <span className="text-[8px] text-[var(--accent-green)] mr-0.5">●</span>}
-              {insight.promoActive && basePct !== null ? (
+              {basePct !== null && basePct - displayPct > 0.05 ? (
                 <>
                   {displayPct.toFixed(0)}%{" "}
                   <span className="text-[var(--accent-orange)]">
@@ -1934,19 +2017,19 @@ function WindowRow({
               ) : (
                 <>
                   {displayPct.toFixed(0)}%
-                  <span className="text-[9px] opacity-70 ml-0.5">{bottleneckLabel}</span>
+                  <span className="text-[9px] opacity-70 ml-0.5">{displayLabel}</span>
                 </>
               )}
             </span>
           ) : (
             <span className="w-32 text-right text-[11px] text-[var(--text-muted)] tabular-nums shrink-0">
-              {formatTokens(tokens)}
+              {primaryValue}
             </span>
           )}
 
           <span className="w-24 text-right text-[11px] text-[var(--text-secondary)] tabular-nums shrink-0 flex flex-col leading-tight">
-            <span>{formatTokens(tokens)}</span>
-            <span className="text-[9px] text-[var(--text-muted)]">{formatCost(win.totalCost)}</span>
+            <span>{primaryValue}</span>
+            <span className="text-[9px] text-[var(--text-muted)]">{secondaryValue}</span>
           </span>
         </div>
       </button>
@@ -2048,7 +2131,13 @@ function WeeklyWindowsView({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const maxTokens = Math.max(
-    ...sorted.map((w) => (viewMode === "output" ? w.outputTokens : w.totalTokens)),
+    ...sorted.map((w) =>
+      viewMode === "output"
+        ? w.outputTokens
+        : viewMode === "total"
+        ? w.totalTokens
+        : w.totalCost
+    ),
     1
   );
 
@@ -2109,16 +2198,22 @@ function WeeklyWindowsView({
       observedPoint: anchor,
     });
 
-    if (insight.estimatedPct == null) return null;
+    const displayMetric = viewModeBottleneck(viewMode);
+    const selectedPct = viewModePct(insight, viewMode) ?? insight.estimatedPct;
+    const selectedNoPromoPct = viewModeNoPromoPct(insight, viewMode);
+    if (selectedPct == null) return null;
 
     return {
-      displayPct: insight.estimatedPct,
-      noPromoPct: insight.noPromoPct,
+      displayPct: selectedPct,
+      noPromoPct:
+        selectedNoPromoPct != null && selectedNoPromoPct - selectedPct > 0.05
+          ? selectedNoPromoPct
+          : null,
       color:
-        BOTTLENECK_COLORS[insight.bottleneck as keyof typeof BOTTLENECK_COLORS] ??
+        BOTTLENECK_COLORS[displayMetric as keyof typeof BOTTLENECK_COLORS] ??
         "var(--accent-orange)",
       label:
-        BOTTLENECK_LABELS[insight.bottleneck as keyof typeof BOTTLENECK_LABELS] ??
+        BOTTLENECK_LABELS[displayMetric as keyof typeof BOTTLENECK_LABELS] ??
         "",
       observedPct: insight.observedPct,
       deltaPct: insight.deltaPct,
@@ -2150,9 +2245,10 @@ function WeeklyWindowsView({
             overlapMs(allBucket.weekStart, allBucket.weekEnd, a.weekStart, a.weekEnd)
         )[0] ?? null;
 
-      const weekPlanTier = planPeriods
-        ? getPlanTierForDate(allBucket.weekStart, planPeriods)
+      const weekPlan = planPeriods
+        ? getPlanForDate(allBucket.weekStart, planPeriods)
         : null;
+      const weekPlanTier = weekPlan?.tier ?? null;
       const weekPlanInfo = weekPlanTier ? PLAN_TIERS[weekPlanTier] : null;
       const allOverride = getWeeklyOverrideMatch(overrides, allBucket, "all");
       const resolvedSonnetBucket =
@@ -2169,9 +2265,8 @@ function WeeklyWindowsView({
         ? getWeeklyOverrideMatch(overrides, resolvedSonnetBucket, "sonnet")
         : null;
 
-      const weeklyAllPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "weekly-all");
-      const weeklySonnetPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "weekly-sonnet");
-      const windowPlanMult = getDisplayPlanMultiplier(weekPlanTier, solvedLimits, "5h");
+      const weeklyAllPlanMult = getDisplayPlanMultiplier(weekPlan, solvedLimits, "weekly-all");
+      const weeklySonnetPlanMult = getDisplayPlanMultiplier(weekPlan, solvedLimits, "weekly-sonnet");
 
       // Find calibration anchors for this week
       const allAnchor = findCalibrationAnchor(calibrations, "weekly-all", allBucket.weekStart);
@@ -2199,7 +2294,6 @@ function WeeklyWindowsView({
           sonnetAnchor
         ),
         weekPlanInfo,
-        windowPlanMultiplier: windowPlanMult,
         allOverride,
         sonnetOverride,
       };
@@ -2317,7 +2411,7 @@ function WeeklyWindowsView({
           </p>
         </div>
         <div className="flex gap-1 bg-[var(--bg-secondary)] rounded-md p-0.5">
-          {(["output", "total"] as ViewMode[]).map((m) => (
+          {(["output", "total", "cost"] as ViewMode[]).map((m) => (
             <button
               key={m}
               onClick={() => setViewMode(m)}
@@ -2327,7 +2421,7 @@ function WeeklyWindowsView({
                   : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
               }`}
             >
-              {m === "output" ? "Output" : "Total"}
+              {m === "output" ? "Output" : m === "total" ? "Total" : "Kwota"}
             </button>
           ))}
         </div>
@@ -2345,7 +2439,6 @@ function WeeklyWindowsView({
             allEst,
             sonnetEst,
             weekPlanInfo,
-            windowPlanMultiplier,
             allOverride,
             sonnetOverride,
           }) => {
@@ -2428,14 +2521,18 @@ function WeeklyWindowsView({
                   <div className="flex items-center gap-2 shrink-0 ml-1">
                     <span className="text-[11px] text-[var(--text-secondary)] tabular-nums flex flex-col items-end leading-tight">
                       <span>
-                        {formatTokens(
-                          viewMode === "output"
-                            ? allBucket.outputTokens
-                            : allBucket.totalTokens
-                        )}
+                        {viewMode === "cost"
+                          ? formatCost(allBucket.totalCost)
+                          : formatTokens(
+                              viewMode === "output"
+                                ? allBucket.outputTokens
+                                : allBucket.totalTokens
+                            )}
                       </span>
                       <span className="text-[9px] text-[var(--text-muted)]">
-                        {formatCost(allBucket.totalCost)}
+                        {viewMode === "cost"
+                          ? formatTokens(allBucket.totalTokens)
+                          : formatCost(allBucket.totalCost)}
                       </span>
                     </span>
                     <span className="text-[10px] text-[var(--text-muted)]">
@@ -2461,7 +2558,11 @@ function WeeklyWindowsView({
                         viewMode={viewMode}
                         maxTokens={maxTokens}
                         promoPeriods={promoPeriods}
-                        planMultiplier={windowPlanMultiplier}
+                        planMultiplier={getDisplayPlanMultiplier(
+                          getPlanForDate(win.startTime, planPeriods),
+                          solvedLimits,
+                          "5h"
+                        )}
                         calibrationSeries={findCalibrationSeries(calibrations, "5h", win.startTime)}
                         calibrationAnchor={findCalibrationAnchor(calibrations, "5h", win.startTime)}
                       />

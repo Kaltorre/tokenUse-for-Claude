@@ -595,6 +595,7 @@ function buildEnsemble(
   }
 
   let totalWeight = 0;
+  let costWeight = 0;
   let wOutput = 0, wIO = 0, wTotal = 0, wCost = 0;
 
   for (const m of methods) {
@@ -603,7 +604,10 @@ function buildEnsemble(
     wOutput += m.outputLimit * w;
     wIO += m.inputOutputLimit * w;
     wTotal += m.totalLimit * w;
-    wCost += m.costLimit * w;
+    if (m.costLimit > 0) {
+      costWeight += w;
+      wCost += m.costLimit * w;
+    }
   }
 
   if (totalWeight === 0) totalWeight = 1;
@@ -612,7 +616,7 @@ function buildEnsemble(
     outputLimit: Math.round(wOutput / totalWeight),
     inputOutputLimit: Math.round(wIO / totalWeight),
     totalLimit: Math.round(wTotal / totalWeight),
-    costLimit: Math.round((wCost / totalWeight) * 100) / 100,
+    costLimit: costWeight > 0 ? Math.round((wCost / costWeight) * 100) / 100 : 0,
     confidence:
       Math.round(
         (methods.reduce((s, m) => s + m.confidence, 0) / methods.length) * 100
