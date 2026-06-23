@@ -19,7 +19,7 @@ import {
   DEFAULT_LIMITS_WEEKLY,
   Bottleneck,
 } from "@/lib/types";
-import { getPlanForDate, weekKeyFromDate } from "@/lib/plans";
+import { getEffectivePlanMultiplier, getPlanForDate, weekKeyFromDate } from "@/lib/plans";
 import { formatTokens, formatCost } from "@/lib/format";
 import {
   estimateUtilization,
@@ -41,7 +41,7 @@ import {
   buildUtilizationResidual,
   buildLimitRegimeEvidence,
   estimatePctFromCostProxy,
-  getWindowTheoreticalMultiplier,
+  calibrationScopeToWindowType,
 } from "@/lib/limit-regimes";
 import {
   Bar,
@@ -162,13 +162,12 @@ function getDisplayPlanMultiplier(
   solvedLimits: Record<CalibrationScope, SolvedLimits> | null,
   scope: CalibrationScope
 ): number {
-  const theoreticalMultiplier =
-    plan && typeof plan === "object"
-      ? getWindowTheoreticalMultiplier(plan, scope === "5h" ? "5h" : "weekly")
-      : PLAN_TIERS[plan ?? "max20"].multiplier;
-  return hasSolvedScopeLimits(solvedLimits, scope)
-    ? theoreticalMultiplier / PLAN_TIERS.max20.multiplier
-    : theoreticalMultiplier;
+  // Multiplier math is centralised in getEffectivePlanMultiplier; this wrapper
+  // only owns the display policy: normalize to the max20 baseline once the
+  // scope has solved limits (so the displayed % matches calibratedPlanLimits).
+  return getEffectivePlanMultiplier(plan, calibrationScopeToWindowType(scope), {
+    normalizeToMax20: hasSolvedScopeLimits(solvedLimits, scope),
+  });
 }
 
 type WeeklyOverrideScope = "all" | "sonnet";

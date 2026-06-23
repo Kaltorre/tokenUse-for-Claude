@@ -18,7 +18,7 @@ import {
 import { formatTokens, formatCost, formatDate } from "@/lib/format";
 import { findCalibrationAnchor, findCalibrationSeries } from "@/lib/calibration";
 import { computeLimitInsight } from "@/lib/limit-insights";
-import { getPlanForDate, getPlanTierForDate, weekKeyFromDate } from "@/lib/plans";
+import { getEffectivePlanMultiplier, getPlanForDate, weekKeyFromDate } from "@/lib/plans";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -435,7 +435,7 @@ function WeeklyPlanChart({ weeklyAll, periods, solvedLimits, promoPeriods = [], 
     const tierInfo = tier ? PLAN_TIERS[tier] : null;
 
     let estimatedPct: number | null = null;
-    const weekPlanMult = (tierInfo?.multiplier ?? 20) / 20;
+    const weekPlanMult = getEffectivePlanMultiplier(planPeriod, "weekly", { normalizeToMax20: true });
     const weekAnchor = findCalibrationAnchor(calibrations, "weekly-all", bucket.weekStart);
     const weekSeries = findCalibrationSeries(calibrations, "weekly-all", bucket.weekStart);
     const insight = computeLimitInsight({
@@ -461,7 +461,9 @@ function WeeklyPlanChart({ weeklyAll, periods, solvedLimits, promoPeriods = [], 
     });
     estimatedPct = insight.estimatedPct;
 
-    const multiplier = tierInfo?.multiplier ?? 1;
+    // Raw (un-normalized) effective multiplier; null plan keeps the legacy ×1
+    // so an unconfigured week is not inflated to the max20 baseline.
+    const multiplier = planPeriod ? getEffectivePlanMultiplier(planPeriod, "weekly") : 1;
     const pctOfMax20 = estimatedPct !== null ? estimatedPct * multiplier : null;
 
     return { weekKey, bucket, tier, tierInfo, multiplier, estimatedPct, pctOfMax20, color: tierInfo?.color ?? "var(--text-muted)" };

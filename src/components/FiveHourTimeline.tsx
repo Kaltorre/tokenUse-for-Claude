@@ -10,7 +10,6 @@ import {
   WeeklyResetConfig,
   PromoPeriod,
   PlanPeriod,
-  PLAN_TIERS,
 } from "@/lib/types";
 import { formatTokens, formatCost } from "@/lib/format";
 import {
@@ -25,7 +24,7 @@ import {
   findCalibrationSeries,
 } from "@/lib/calibration";
 import { computeLimitInsight } from "@/lib/limit-insights";
-import { getPlanTierForDate } from "@/lib/plans";
+import { getEffectivePlanMultiplier, getPlanForDate } from "@/lib/plans";
 
 interface Props {
   windows: FiveHourWindow[];
@@ -382,8 +381,8 @@ export function FiveHourTimeline({
     group.weekTotalMessages += win.messageCount;
     group.weekWindowCount++;
 
-    const winPlanTier = getPlanTierForDate(win.startTime, planPeriods);
-    const winPlanMult = (winPlanTier ? PLAN_TIERS[winPlanTier].multiplier : 20) / 20;
+    const winPlan = getPlanForDate(win.startTime, planPeriods);
+    const winPlanMult = getEffectivePlanMultiplier(winPlan, "5h", { normalizeToMax20: true });
     const winAnchor = findCalibrationAnchor(calibrations, "5h", win.startTime);
     const winSeries = findCalibrationSeries(calibrations, "5h", win.startTime);
     const util = getWindowUtil(win, derivedLimits, calibrations, solvedLimits, promoPeriods, winPlanMult, winSeries, winAnchor);
@@ -421,8 +420,8 @@ export function FiveHourTimeline({
           let lastDateStr = "";
 
           const weeklySolved = solvedLimits?.["weekly-all"];
-          const weekPlanTier = getPlanTierForDate(group.weekStart.toISOString(), planPeriods);
-          const weekPlanMult = (weekPlanTier ? PLAN_TIERS[weekPlanTier].multiplier : 20) / 20;
+          const weekPlan = getPlanForDate(group.weekStart.toISOString(), planPeriods);
+          const weekPlanMult = getEffectivePlanMultiplier(weekPlan, "weekly", { normalizeToMax20: true });
           const weekAnchor = findCalibrationAnchor(calibrations, "weekly-all", group.weekStart.toISOString());
           const weekSeries = findCalibrationSeries(calibrations, "weekly-all", group.weekStart.toISOString());
           const weeklySplit = aggregateWeeklyPeakSplit(group.windows);
@@ -604,8 +603,8 @@ export function FiveHourTimeline({
                   viewMode === "output" ? win.outputTokens : win.totalTokens;
                 const isExpanded = expanded === win.id;
 
-                const winPlanTier2 = getPlanTierForDate(win.startTime, planPeriods);
-                const winPlanMult2 = (winPlanTier2 ? PLAN_TIERS[winPlanTier2].multiplier : 20) / 20;
+                const winPlan2 = getPlanForDate(win.startTime, planPeriods);
+                const winPlanMult2 = getEffectivePlanMultiplier(winPlan2, "5h", { normalizeToMax20: true });
                 const winAnchor2 = findCalibrationAnchor(calibrations, "5h", win.startTime);
                 const winSeries2 = findCalibrationSeries(calibrations, "5h", win.startTime);
                 const util = getWindowUtil(

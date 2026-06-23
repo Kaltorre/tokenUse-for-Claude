@@ -12,25 +12,29 @@ import {
   PLAN_TIERS,
 } from "./types";
 import { getActivePromoMultiplier, isInPromoRange, normalizeUsageToBase, PromoNormalizationMode } from "./utilization";
-import { getPlanTierForDate } from "./plans";
+import { getPlanForDate, getPlanTierForDate } from "./plans";
+import { calibrationScopeToWindowType, getWindowTheoreticalMultiplier } from "./limit-regimes";
 
 const MAX20_MULTIPLIER = PLAN_TIERS.max20.multiplier;
 
 /**
- * Scale a per-plan value (cost or token count) to the max20 baseline.
- * Calibration data is captured under whichever plan was active at that time;
- * normalising to max20 lets the solver mix points from different plans, and
- * lets `calibratedPlanLimits` (which divides by 20) project to any tier.
+ * Scale a per-plan value (cost or token count) to the max20 baseline using the
+ * point's *effective* capacity multiplier (override-aware). Calibration data is
+ * captured under whichever plan/window-override was active at that time;
+ * normalising to max20 lets the solver mix points from different plans, and lets
+ * `calibratedPlanLimits` (which divides by 20) project to any tier.
  *
- * Legacy points without `planTier` are assumed to already be on max20 — keeps
- * pre-tag historical data interpretable until backfill runs.
+ * `multiplier` is the resolved capacity multiplier for the point's window
+ * (per-window override > legacy override > tier default). Undefined or ≤0 =
+ * legacy point without a resolvable plan, assumed already on max20 (no scaling).
  */
-function scaleToMax20(value: number, planTier: PlanTier | undefined): number {
-  if (planTier == null) return value;
-  const tierMult = PLAN_TIERS[planTier].multiplier;
-  if (tierMult <= 0) return value;
-  return value * (MAX20_MULTIPLIER / tierMult);
+function scaleToMax20(value: number, multiplier: number | undefined): number {
+  if (multiplier == null || multiplier <= 0) return value;
+  return value * (MAX20_MULTIPLIER / multiplier);
 }
+
+/** A calibration point with its resolved effective multiplier for solving. */
+type SolverPoint = CalibrationPoint & { scaleMultiplier: number | undefined };
 
 const STORAGE_KEY = "claude-usage-calibrations";
 
@@ -172,8 +176,8 @@ function formatReportedPct(value: number): string {
   return Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
 }
 
-function anomalyGroupKey(scope: CalibrationScope, planTier: PlanTier | null): string {
-  return `${scope}::${planTier ?? "unknown"}`;
+function anomalyGroupKey(scope: CalibrationScope, multiplier: number | null): string {
+  return `${scope}::${multiplier ?? "unknown"}`;
 }
 
 function getNormalizedPointUsage(point: CalibrationPoint): Required<NonNullable<CalibrationPoint["normalizedTokens"]>> | null {
@@ -391,7 +395,7 @@ export function buildCalibrationPoint(
  * For each calibration point, derive limits assuming max(out/L_o, io/L_io, tot/L_t) = pct
  * We try each dimension as the binding constraint
  */
-function solveDirectMethod(points: CalibrationPoint[]): SolvedLimits["methods"][0] | null {
+function solveDirectMethod(points: SolverPoint[]): SolvedLimits["methods"][0] | null {
   if (points.length === 0) return null;
 
   const outputLimits: number[] = [];
@@ -405,9 +409,9 @@ function solveDirectMethod(points: CalibrationPoint[]): SolvedLimits["methods"][
     if (pct <= 0) continue;
 
     // Scale to max20 baseline so points from different plans can be mixed
-    const out = scaleToMax20(normalized.output, p.planTier);
-    const inp = scaleToMax20(normalized.input, p.planTier);
-    const tot = scaleToMax20(normalized.total, p.planTier);
+    const out = scaleToMax20(normalized.output, p.scaleMultiplier);
+    const inp = scaleToMax20(normalized.input, p.scaleMultiplier);
+    const tot = scaleToMax20(normalized.total, p.scaleMultiplier);
 
     // Each dimension could be the bottleneck
     // Base limit = normalized usage / pct
@@ -442,7 +446,7 @@ function solveDirectMethod(points: CalibrationPoint[]): SolvedLimits["methods"][
  * Method 2: Cost-based estimation
  * Assumes % correlates with cost: cost / costLimit = pct
  */
-function solveCostMethod(points: CalibrationPoint[]): SolvedLimits["methods"][0] | null {
+function solveCostMethod(points: SolverPoint[]): SolvedLimits["methods"][0] | null {
   const validPoints = points.filter((p) => p.cost > 0 && p.reportedPct > 0);
   if (validPoints.length === 0) return null;
 
@@ -451,7 +455,7 @@ function solveCostMethod(points: CalibrationPoint[]): SolvedLimits["methods"][0]
     const normalized = getNormalizedPointUsage(p);
     if (!normalized) continue;
     const pct = p.reportedPct / 100;
-    const scaledCost = scaleToMax20(normalized.cost, p.planTier);
+    const scaledCost = scaleToMax20(normalized.cost, p.scaleMultiplier);
     costLimits.push(scaledCost / pct);
   }
 
@@ -494,7 +498,7 @@ function solveCostMethod(points: CalibrationPoint[]): SolvedLimits["methods"][0]
  *
  * With enough points, solve via least squares
  */
-function solveWeightedMethod(points: CalibrationPoint[]): {
+function solveWeightedMethod(points: SolverPoint[]): {
   result: SolvedLimits["methods"][0];
   weights: SolvedLimits["weights"];
 } | null {
@@ -519,10 +523,10 @@ function solveWeightedMethod(points: CalibrationPoint[]): {
     effective: (() => {
       const normalized = getNormalizedPointUsage(p);
       if (!normalized) return 0;
-      const out = scaleToMax20(normalized.output, p.planTier);
-      const inp = scaleToMax20(normalized.input, p.planTier);
-      const cw = scaleToMax20(normalized.cacheWrite, p.planTier);
-      const cr = scaleToMax20(normalized.cacheRead, p.planTier);
+      const out = scaleToMax20(normalized.output, p.scaleMultiplier);
+      const inp = scaleToMax20(normalized.input, p.scaleMultiplier);
+      const cw = scaleToMax20(normalized.cacheWrite, p.scaleMultiplier);
+      const cr = scaleToMax20(normalized.cacheRead, p.scaleMultiplier);
       return (
         out * priceRatios.output +
         inp * priceRatios.input +
@@ -641,11 +645,23 @@ export function detectAnomalies(
     const original = originalById.get(analytics.id);
     if (!original) continue;
 
-    const planTier =
+    // Group by effective (override-aware) multiplier, not bare tier: two points
+    // on the same tier but different window-level overrides have non-comparable
+    // per-1% baselines and must not pollute each other's anomaly detection.
+    const plan =
       planPeriods.length > 0
-        ? getPlanTierForDate(analytics.windowStart ?? analytics.timestamp, planPeriods)
+        ? getPlanForDate(analytics.windowStart ?? analytics.timestamp, planPeriods)
         : null;
-    const key = anomalyGroupKey(analytics.scope, planTier);
+    // Same fallback order as solveLimits: live period wins for the multiplier;
+    // snapshotted planTier keeps legacy points (no matching period) grouped by
+    // their tier instead of collapsing into the "unknown" bucket.
+    const planTier = original.planTier ?? plan?.tier ?? null;
+    const effectiveMultiplier = plan
+      ? getWindowTheoreticalMultiplier(plan, calibrationScopeToWindowType(analytics.scope))
+      : planTier
+      ? PLAN_TIERS[planTier].multiplier
+      : null;
+    const key = anomalyGroupKey(analytics.scope, effectiveMultiplier);
     const group = grouped.get(key) ?? [];
     group.push({ analytics, original, planTier });
     grouped.set(key, group);
@@ -733,25 +749,31 @@ export function solveLimits(
   planPeriods: PlanPeriod[] = []
 ): SolvedLimits {
   // Filter to points that have complete data (screenshot-sourced entries may lack tokens)
-  // and backfill planTier from planPeriods so the solver can scale to max20 baseline.
-  const points = allPoints
+  // and resolve each point's effective (override-aware) capacity multiplier so the
+  // solver scales to the max20 baseline the same way the UI displays it (see A1).
+  const windowType = calibrationScopeToWindowType(scope);
+  const points: SolverPoint[] = allPoints
     .filter(
       (p) =>
         p.scope === scope &&
         p.tokens != null &&
         p.anomalyFlag?.status !== 'excluded'
     )
-    .map((p) =>
-      p.planTier
-        ? p
-        : {
-            ...p,
-            planTier:
-              planPeriods.length > 0
-                ? getPlanTierForDate(p.windowStart ?? p.timestamp, planPeriods) ?? undefined
-                : undefined,
-          }
-    );
+    .map((p) => {
+      const plan =
+        planPeriods.length > 0
+          ? getPlanForDate(p.windowStart ?? p.timestamp, planPeriods)
+          : null;
+      // Live period (override-aware) takes precedence; snapshotted planTier is
+      // only a fallback when no period matches, then legacy (undefined = max20).
+      const planTier = p.planTier ?? plan?.tier ?? undefined;
+      const scaleMultiplier = plan
+        ? getWindowTheoreticalMultiplier(plan, windowType)
+        : planTier
+        ? PLAN_TIERS[planTier].multiplier
+        : undefined;
+      return { ...p, planTier, scaleMultiplier };
+    });
 
   const methods: SolvedLimits["methods"] = [];
   let weights: SolvedLimits["weights"] = null;

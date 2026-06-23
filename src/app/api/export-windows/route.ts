@@ -10,8 +10,8 @@ import {
   computeWeightedPromoMultiplier,
   DEFAULT_WEEKLY_CONFIG,
 } from "@/lib/limits-analyzer";
-import { CalibrationPoint, FiveHourWindow, PlanConfig, PLAN_TIERS, PromoPeriod } from "@/lib/types";
-import { getPlanForDate } from "@/lib/plans";
+import { CalibrationPoint, FiveHourWindow, LimitWindowType, PlanConfig, PLAN_TIERS, PromoPeriod } from "@/lib/types";
+import { getEffectivePlanMultiplier, getPlanForDate } from "@/lib/plans";
 import { PRICING_TABLE } from "@/lib/pricing";
 import { getActivePromoMultiplier } from "@/lib/utilization";
 
@@ -86,18 +86,27 @@ function describePromoSchedule(schedule: PromoPeriod["schedule"]): string {
   return `${dayLabel} ${mode} ${schedule.hourFrom}:00-${schedule.hourTo}:00 ET`;
 }
 
-function getPlanContext(date: string, planPeriods: PlanConfig["periods"]) {
+function getPlanContext(
+  date: string,
+  planPeriods: PlanConfig["periods"],
+  windowType?: LimitWindowType
+) {
   const plan = getPlanForDate(date, planPeriods);
   if (!plan) return null;
 
   const tier = PLAN_TIERS[plan.tier];
+  // Override-aware effective multiplier for the requested window; falls back to
+  // the tier default when no window type is given (plan-level header).
+  const multiplier = windowType
+    ? getEffectivePlanMultiplier(plan, windowType)
+    : tier.multiplier;
   return {
     id: plan.id,
     tier: plan.tier,
     label: tier.label,
     shortLabel: tier.shortLabel,
-    multiplierVsMax20: tier.multiplier,
-    multiplierVsPro: round(tier.multiplier / PLAN_TIERS.pro.multiplier, 2),
+    multiplierVsMax20: multiplier,
+    multiplierVsPro: round(multiplier / PLAN_TIERS.pro.multiplier, 2),
     monthlyPrice: tier.monthlyPrice,
     startDate: plan.startDate,
     endDate: plan.endDate ?? null,
@@ -271,7 +280,7 @@ function buildExportData() {
   const currentPlan = getPlanContext(exportedAt, planPeriods);
 
   const windowSummaries = windows.map((window) => {
-    const plan = getPlanContext(window.startTime, planPeriods);
+    const plan = getPlanContext(window.startTime, planPeriods, "5h");
     const promo = buildPromoContext({
       start: window.startTime,
       end: window.endTime,
@@ -313,7 +322,7 @@ function buildExportData() {
   });
 
   const weeklyAllSummaries = weeklyAll.map((bucket) => {
-    const plan = getPlanContext(bucket.weekStart, planPeriods);
+    const plan = getPlanContext(bucket.weekStart, planPeriods, "weekly");
     const overlappingWindows = getWindowsInRange(bucket.weekStart, bucket.weekEnd, windows);
     const promo = buildPromoContext({
       start: bucket.weekStart,
@@ -363,7 +372,7 @@ function buildExportData() {
   });
 
   const weeklySonnetSummaries = weeklySonnet.map((bucket) => {
-    const plan = getPlanContext(bucket.weekStart, planPeriods);
+    const plan = getPlanContext(bucket.weekStart, planPeriods, "weekly");
     const overlappingWindows = getWindowsInRange(bucket.weekStart, bucket.weekEnd, windows);
     const promo = buildPromoContext({
       start: bucket.weekStart,

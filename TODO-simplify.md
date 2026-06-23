@@ -15,7 +15,13 @@ is computed in lib. No component re-prices tokens. The real conceptual gap is
 
 ## A. Conceptual / altitude (the deep fixes)
 
-### A1. One canonical resolver for the effective plan multiplier
+### A1. One canonical resolver for the effective plan multiplier ✅ DONE (2026-06-14)
+> `getEffectivePlanMultiplier(plan, windowType, { normalizeToMax20 })` added to
+> `src/lib/plans.ts`. All four consumers now use it; FiveHourTimeline & PlanTab
+> were switched from `getPlanTierForDate` to `getPlanForDate` so per-window
+> overrides apply. export-windows `getPlanContext` takes a windowType. No-override
+> behavior is numerically unchanged. B5 (the dead union) is subsumed.
+
 - `LimitsTab.tsx:160` `getDisplayPlanMultiplier` is the only place aware of
   `theoreticalMultipliers`. Divergent, override-blind copies exist in:
   - `FiveHourTimeline.tsx:386,425` — `PLAN_TIERS[tier].multiplier / 20`
@@ -27,7 +33,15 @@ is computed in lib. No component re-prices tokens. The real conceptual gap is
   in `src/lib/plans.ts` (wrapping `getWindowTheoreticalMultiplier`), used by all
   four consumers; delete the component-local copy.
 
-### A2. Calibration solver is blind to `theoreticalMultipliers`
+### A2. Calibration solver is blind to `theoreticalMultipliers` ✅ DONE (2026-06-14)
+> `scaleToMax20` now takes an effective `multiplier` (not a bare `PlanTier`).
+> `solveLimits` resolves each point's override-aware multiplier (live period >
+> snapshot tier > legacy/no-scaling) onto a new `SolverPoint.scaleMultiplier`;
+> all three solver methods scale by it. `anomalyGroupKey` keys on the effective
+> multiplier and shares solveLimits' fallback order. STILL DEFERRED: the
+> "longer term" snapshot of the resolved multiplier/regime id onto
+> `CalibrationPoint` in `buildCalibrationPoint` (needs a new optional field).
+
 - `calibration.ts:28` `scaleToMax20(value, planTier)` scales by tier multiplier
   only; calibration points captured under e.g. "Max100 with 5h ×10" get folded
   into the max20 baseline at ×5 (`solveDirectMethod`/`solveCostMethod`/

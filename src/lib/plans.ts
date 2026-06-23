@@ -1,4 +1,29 @@
-import { PlanPeriod, PlanTier } from "@/lib/types";
+import { LimitWindowType, PLAN_TIERS, PlanPeriod, PlanTier } from "@/lib/types";
+import { getWindowTheoreticalMultiplier } from "@/lib/limit-regimes";
+
+/**
+ * Canonical resolver for the effective capacity multiplier of a plan for a
+ * given limit window. Wraps `getWindowTheoreticalMultiplier` so per-window
+ * `theoreticalMultipliers` overrides are honoured by every consumer, and
+ * centralises the "normalize to the max20 baseline" step that the Limits tab,
+ * timeline and plan chart each used to re-derive locally (and inconsistently).
+ *
+ * - `plan` as a `PlanPeriod` → override-aware (per-window > legacy > tier default).
+ * - `plan` as a tier string or `null` → tier default (null ⇒ max20).
+ * - `normalizeToMax20` divides by the max20 multiplier so the result is a ratio
+ *   vs the Max $200 reference (e.g. Pro ⇒ 1/20 = 0.05).
+ */
+export function getEffectivePlanMultiplier(
+  plan: PlanPeriod | PlanTier | null,
+  windowType: LimitWindowType,
+  opts: { normalizeToMax20?: boolean } = {}
+): number {
+  const raw =
+    plan && typeof plan === "object"
+      ? getWindowTheoreticalMultiplier(plan, windowType)
+      : PLAN_TIERS[plan ?? "max20"].multiplier;
+  return opts.normalizeToMax20 ? raw / PLAN_TIERS.max20.multiplier : raw;
+}
 
 export function getPlanForDate(date: string, periods: PlanPeriod[]): PlanPeriod | null {
   const t = new Date(date).getTime();
